@@ -1,0 +1,427 @@
+name: Task Ethics — CI/CD Pipeline
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+  pull_request:
+    branches:
+      - main
+      - develop
+  workflow_dispatch:
+
+env:
+  PYTHON_VERSION: "3.11"
+  APP_NAME: task-ethics-pact-erp
+
+jobs:
+  # ─────────────────────────────────────────────
+  # JOB 1: LINT & CODE QUALITY
+  # ─────────────────────────────────────────────
+  lint:
+    name: Lint & Code Quality
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install linting dependencies
+        run: |
+          pip install --upgrade pip
+          pip install flake8 black isort mypy
+
+      - name: Run Black (code formatting check)
+        run: black --check --diff .
+
+      - name: Run isort (import order check)
+        run: isort --check-only --diff .
+
+      - name: Run Flake8 (style & syntax lint)
+        run: |
+          flake8 . \
+            --max-line-length=120 \
+            --exclude=.git,__pycache__,.venv \
+            --statistics
+
+      - name: Run mypy (type checking)
+        run: mypy . --ignore-missing-imports --strict-optional
+
+  # ─────────────────────────────────────────────
+  # JOB 2: UNIT & INTEGRATION TESTS
+  # ─────────────────────────────────────────────
+  test:
+    name: Unit & Integration Tests
+    runs-on: ubuntu-latest
+    needs: lint
+
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install application dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-cov pytest-mock responses
+
+      - name: Run tests with coverage
+        env:
+          # Inject test credentials from repository secrets — never hard-code
+          TASK_ETHICS_API_KEY: ${{ secrets.TASK_ETHICS_API_KEY_TEST }}
+          TASK_ETHICS_BASE_URL: ${{ secrets.TASK_ETHICS_BASE_URL_TEST }}
+          TASK_ETHICS_COMPANY_CODE: ${{ secrets.TASK_ETHICS_COMPANY_CODE_TEST }}
+        run: |
+          pytest tests/ \
+            --cov=. \
+            --cov-report=xml:coverage.xml \
+            --cov-report=term-missing \
+            --cov-fail-under=75 \
+            -v
+
+      - name: Upload coverage report
+        uses: codecov/codecov-action@v4
+        if: matrix.python-version == env.PYTHON_VERSION
+        with:
+          files: coverage.xml
+          flags: unittests
+          name: task-ethics-coverage
+
+  # ─────────────────────────────────────────────
+  # JOB 3: GST COMPLIANCE MODULE TESTS
+  # (dedicated job — GST logic is compliance-critical)
+  # ─────────────────────────────────────────────
+  gst-compliance-tests:
+    name: GST Compliance Module Tests
+    runs-on: ubuntu-latest
+    needs: lint
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-cov
+
+      - name: Run GST compliance tests (GSTR-1, GSTR-3B, e-Invoice)
+        run: |
+          pytest tests/gst/ \
+            --cov=gst_compliance \
+            --cov-report=term-missing \
+            --cov-fail-under=90 \
+            -v \
+            --tb=short
+
+      - name: Validate GST rate calculations
+        run: |
+          pytest tests/gst/test_gst_calculations.py \
+            -v --tb=long
+
+  # ─────────────────────────────────────────────
+  # JOB 4: SECURITY SCAN
+  # ─────────────────────────────────────────────
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    needs: lint
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install security tools
+        run: |
+          pip install bandit safety pip-audit detect-secrets
+
+      - name: Run Bandit (static security analysis)
+        run: |
+          bandit -r . \
+            --exclude .venv,tests \
+            --severity-level medium \
+            -f json -o bandit-report.json || true
+          bandit -r . \
+            --exclude .venv,tests \
+            --severity-level medium
+
+      - name: Run pip-audit (dependency vulnerability check)
+        run: pip-audit --requirement requirements.txt
+
+      - name: Scan for hardcoded secrets (API keys, PAN, UAN numbers)
+        run: detect-secrets scan --baseline .secrets.baseline || true
+
+      - name: Upload Bandit security report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bandit-security-report
+          path: bandit-report.json
+
+  # ─────────────────────────────────────────────
+  # JOB 5: BUILD & PACKAGE
+  # ─────────────────────────────────────────────
+  build:
+    name: Build & Package
+    runs-on: ubuntu-latest
+    needs: [test, gst-compliance-tests, security]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install build dependencies
+        run: |
+          pip install --upgrade pip build wheel
+
+      - name: Install application dependencies
+        run: pip install -r requirements.txt
+
+      - name: Build distribution package
+        run: python -m build
+
+      - name: Set build metadata
+        id: meta
+        run: |
+          echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+          echo "build_date=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> $GITHUB_OUTPUT
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: task-ethics-dist-${{ steps.meta.outputs.sha_short }}
+          path: dist/
+          retention-days: 14
+
+  # ─────────────────────────────────────────────
+  # JOB 6: DOCKER BUILD & PUSH
+  # ─────────────────────────────────────────────
+  docker:
+    name: Docker Build & Push
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'
+
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker metadata
+        id: docker_meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}/${{ env.APP_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.docker_meta.outputs.tags }}
+          labels: ${{ steps.docker_meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            APP_VERSION=${{ github.sha }}
+            BUILD_DATE=${{ steps.docker_meta.outputs.created }}
+
+  # ─────────────────────────────────────────────
+  # JOB 7: DEPLOY TO STAGING
+  # ─────────────────────────────────────────────
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: docker
+    if: github.ref == 'refs/heads/develop'
+    environment:
+      name: staging
+      url: ${{ vars.STAGING_URL }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Deploy to staging environment
+        env:
+          DEPLOY_HOST: ${{ secrets.STAGING_HOST }}
+          DEPLOY_USER: ${{ secrets.STAGING_USER }}
+          SSH_PRIVATE_KEY: ${{ secrets.STAGING_SSH_KEY }}
+        run: |
+          echo "$SSH_PRIVATE_KEY" > /tmp/deploy_key
+          chmod 600 /tmp/deploy_key
+          ssh -o StrictHostKeyChecking=no -i /tmp/deploy_key \
+            $DEPLOY_USER@$DEPLOY_HOST \
+            "cd /opt/task-ethics && \
+             docker pull ghcr.io/${{ github.repository }}/${{ env.APP_NAME }}:develop && \
+             docker compose -f docker-compose.staging.yml up -d --force-recreate"
+
+      - name: Run staging smoke tests
+        run: |
+          pip install httpx pytest
+          pytest tests/smoke/ \
+            --base-url=${{ vars.STAGING_URL }} \
+            -v
+
+      - name: Validate ERP module endpoints on staging
+        run: |
+          python scripts/validate_endpoints.py \
+            --url=${{ vars.STAGING_URL }} \
+            --modules=finance,inventory,sales,procurement,hr,crm,gst
+
+      - name: Notify Slack on staging deploy
+        if: always()
+        uses: slackapi/slack-github-action@v1
+        with:
+          payload: |
+            {
+              "text": "Task Ethics Staging Deploy: ${{ job.status }} — ${{ github.sha }}\nBranch: ${{ github.ref_name }}"
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+  # ─────────────────────────────────────────────
+  # JOB 8: DEPLOY TO PRODUCTION
+  # ─────────────────────────────────────────────
+  deploy-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: docker
+    if: github.ref == 'refs/heads/main'
+    environment:
+      name: production
+      url: ${{ vars.PRODUCTION_URL }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Deploy to production environment
+        env:
+          DEPLOY_HOST: ${{ secrets.PROD_HOST }}
+          DEPLOY_USER: ${{ secrets.PROD_USER }}
+          SSH_PRIVATE_KEY: ${{ secrets.PROD_SSH_KEY }}
+        run: |
+          echo "$SSH_PRIVATE_KEY" > /tmp/deploy_key
+          chmod 600 /tmp/deploy_key
+          ssh -o StrictHostKeyChecking=no -i /tmp/deploy_key \
+            $DEPLOY_USER@$DEPLOY_HOST \
+            "cd /opt/task-ethics && \
+             docker pull ghcr.io/${{ github.repository }}/${{ env.APP_NAME }}:latest && \
+             docker compose -f docker-compose.prod.yml up -d --force-recreate --no-downtime"
+
+      - name: Run production health checks
+        run: |
+          pip install httpx
+          python scripts/healthcheck.py \
+            --url=${{ vars.PRODUCTION_URL }} \
+            --retries=5
+
+      - name: Verify GST module is operational post-deploy
+        run: |
+          python scripts/gst_health_check.py \
+            --url=${{ vars.PRODUCTION_URL }} \
+            --api-key=${{ secrets.TASK_ETHICS_API_KEY_PROD }}
+
+      - name: Tag release in Git
+        run: |
+          git config user.email "ci@taskethics.in"
+          git config user.name "Task Ethics CI"
+          git tag -a "release-$(date +%Y%m%d-%H%M%S)" -m "Production deploy ${{ github.sha }}"
+          git push origin --tags
+
+      - name: Notify Slack on production deploy
+        if: always()
+        uses: slackapi/slack-github-action@v1
+        with:
+          payload: |
+            {
+              "text": "✅ Task Ethics Production Deploy: ${{ job.status }} — ${{ github.sha }}\nDeployed by: ${{ github.actor }}"
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+  # ─────────────────────────────────────────────
+  # JOB 9: ROLLBACK (manual trigger)
+  # ─────────────────────────────────────────────
+  rollback:
+    name: Rollback Production
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    environment: production
+
+    steps:
+      - name: Rollback to previous Docker image
+        env:
+          DEPLOY_HOST: ${{ secrets.PROD_HOST }}
+          DEPLOY_USER: ${{ secrets.PROD_USER }}
+          SSH_PRIVATE_KEY: ${{ secrets.PROD_SSH_KEY }}
+        run: |
+          echo "$SSH_PRIVATE_KEY" > /tmp/deploy_key
+          chmod 600 /tmp/deploy_key
+          ssh -o StrictHostKeyChecking=no -i /tmp/deploy_key \
+            $DEPLOY_USER@$DEPLOY_HOST \
+            "cd /opt/task-ethics && docker compose -f docker-compose.prod.yml rollback"
+
+      - name: Notify on rollback
+        uses: slackapi/slack-github-action@v1
+        with:
+          payload: |
+            {
+              "text": "⚠️ Task Ethics ROLLBACK triggered by ${{ github.actor }}"
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
