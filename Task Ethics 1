@@ -3,7 +3,7 @@ import os
 import json
 from datetime import date
 from dotenv import load_dotenv
-from openai import OpenAI 
+from openai import OpenAI # swap for anthropic if preferred
 
 load_dotenv()
 
@@ -11,7 +11,7 @@ load_dotenv()
 # BASE CLIENT
 # ─────────────────────────────────────────────────────────────────────────────
 
-class TaskLLMClient:
+class TASKLLMClient:
     """Thin wrapper around the LLM API for TASK ETHICS use-cases."""
 
     def __init__(self, model: str = "gpt-4o"):
@@ -37,11 +37,11 @@ class TaskLLMClient:
         return json.loads(raw)
 
 
-llm = TaskLLMClient()
+llm = TASKLLMClient()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 1. FINANCIAL MANAGEMENT — AI CFO Assistant
+# 1. FINANCIAL MANAGEMENT 
 # ─────────────────────────────────────────────────────────────────────────────
 
 class FinancialAI:
@@ -106,7 +106,7 @@ class FinancialAI:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 2. HR & PAYROLL — Smart HR Assistant
+# 2. HR & PAYROLL 
 # ─────────────────────────────────────────────────────────────────────────────
 
 class HRPayrollAI:
@@ -151,7 +151,7 @@ class HRPayrollAI:
             f" Annual CTC : ₹{candidate['ctc']:,}\n"
             f" Joining Date: {candidate['joining_date']}\n"
             f" Location : {candidate['location']}\n\n"
-            "Company name is PACT Software Services Pvt. Ltd. Use formal tone."
+            "Company name is TASK Software Services Pvt. Ltd. Use formal tone."
         )
         return llm.chat(self.SYSTEM, prompt, temperature=0.5)
 
@@ -178,7 +178,7 @@ class HRPayrollAI:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 3. CRM — AI Sales & Customer Intelligence
+# 3. CRM 
 # ─────────────────────────────────────────────────────────────────────────────
 
 class CRMAI:
@@ -243,7 +243,7 @@ class CRMAI:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 4. INVENTORY & PROCUREMENT 
+# 4. INVENTORY & PROCUREMENT
 # ─────────────────────────────────────────────────────────────────────────────
 
 class InventoryAI:
@@ -315,7 +315,7 @@ class InventoryAI:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 5. BUSINESS INTELLIGENCE — Natural Language to Insights
+# 5. BUSINESS INTELLIGENCE 
 # ─────────────────────────────────────────────────────────────────────────────
 
 class BusinessIntelligenceAI:
@@ -392,7 +392,7 @@ class BusinessIntelligenceAI:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 6. CUSTOMER SUPPORT CHATBOT (ESS Portal / CRM Service Module)
+# 6. CUSTOMER SUPPORT CHATBOT 
 # ─────────────────────────────────────────────────────────────────────────────
 
 class ERPSupportChatbot:
@@ -404,10 +404,10 @@ class ERPSupportChatbot:
     """
 
     SYSTEM = (
-        "You are Task Assistant, a helpful ERP support bot for Task Software. "
+        "You are TASK Assistant, a helpful ERP support bot for TASK Software. "
         "You help employees and customers with queries about orders, invoices, "
         "leave balances, payslips, and general ERP navigation. "
-        "If you cannot answer, politely escalate to the support team at support@taskethics.com."
+        "If you cannot answer, politely escalate to the support team at support@TASKsoft.com."
     )
 
     def __init__(self):
@@ -482,7 +482,7 @@ class ManufacturingAI:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Run all modules with sample data
+# DEMO — Run all modules with sample data
 # ─────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -492,7 +492,7 @@ if __name__ == "__main__":
     print("\n TASK ETHICS — LLM Integration Demo \n")
 
     # 1. Finance
-    print(" FINANCIAL AI — P&L Summary")
+    print("FINANCIAL AI — P&L Summary")
     fin = FinancialAI()
     print(fin.summarise_pnl({
         "revenue": 12_500_000, "cogs": 7_800_000,
@@ -500,12 +500,12 @@ if __name__ == "__main__":
     }))
     print(sep)
 
-    print("1️ FINANCIAL AI — GL Auto-Classification")
+    print(" FINANCIAL AI — GL Auto-Classification")
     print(fin.classify_gl_entry("Office stationery purchased from Sriram Traders", 4800))
     print(sep)
 
     # 2. HR
-    print("HR AI — Payslip Explanation")
+    print(" HR AI — Payslip Explanation")
     hr = HRPayrollAI()
     print(hr.explain_payslip({
         "employee": "Priya Sharma", "basic": 35000, "hra": 14000,
