@@ -1,0 +1,814 @@
+"""
+=============================================================================
+Task Ehics - Sample Python Integration Code
+Website: https://taskethics.in
+Description: Demonstrates interaction with core TASK ETHICS modules including
+             Financial Management, Inventory, HR & Payroll, CRM, Sales,
+             Procurement, and GST Compliance reporting.
+=============================================================================
+"""
+
+import requests
+import json
+from datetime import datetime, date
+from dataclasses import dataclass, field, asdict
+from typing import Optional, List
+
+# ─────────────────────────────────────────────
+# CONFIGURATION
+# ─────────────────────────────────────────────
+BASE_URL = "https://ethics.task.online/api/v1"   # Replace with actual API base
+API_KEY  = "YOUR_API_KEY_HERE"                     # Replace with your API key
+
+HEADERS = {
+    "Content-Type": "application/json",
+    "Authorization": f"Bearer {API_KEY}",
+    "Accept": "application/json",
+}
+
+
+# ─────────────────────────────────────────────
+# HELPER — Generic HTTP request handler
+# ─────────────────────────────────────────────
+def api_request(method: str, endpoint: str, payload: dict = None) -> dict:
+    """
+    Generic API request wrapper for Task Ehics ERP.
+
+    Args:
+        method   : HTTP method — 'GET', 'POST', 'PUT', 'DELETE'
+        endpoint : API endpoint path (e.g. '/inventory/items')
+        payload  : Optional request body as dict
+
+    Returns:
+        Parsed JSON response as dict, or error dict.
+    """
+    url = f"{BASE_URL}{endpoint}"
+    try:
+        response = requests.request(
+            method=method.upper(),
+            url=url,
+            headers=HEADERS,
+            json=payload,
+            timeout=30,
+        )
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.HTTPError as e:
+        return {"error": f"HTTP error: {e}", "status_code": response.status_code}
+    except requests.exceptions.ConnectionError:
+        return {"error": "Connection failed. Check BASE_URL and network."}
+    except requests.exceptions.Timeout:
+        return {"error": "Request timed out."}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+# ═════════════════════════════════════════════
+# MODULE 1: AUTHENTICATION
+# ═════════════════════════════════════════════
+class TaskAuth:
+    """Handles Task Ethics authentication and token management."""
+
+    def __init__(self, username: str, password: str, company_code: str):
+        self.username     = username
+        self.password     = password
+        self.company_code = company_code
+        self.token        = None
+
+    def login(self) -> str:
+        """
+        Authenticate with Task Ethics and retrieve a session token.
+
+        Returns:
+            Access token string on success, or empty string on failure.
+        """
+        payload = {
+            "username":     self.username,
+            "password":     self.password,
+            "company_code": self.company_code,
+        }
+        result = api_request("POST", "/auth/login", payload)
+
+        if "token" in result:
+            self.token = result["token"]
+            # Update global headers with fresh token
+            HEADERS["Authorization"] = f"Bearer {self.token}"
+            print(f"[AUTH] Login successful. Token expires: {result.get('expires_at', 'N/A')}")
+            return self.token
+        else:
+            print(f"[AUTH] Login failed: {result.get('error')}")
+            return ""
+
+    def logout(self):
+        """Invalidate the current session token."""
+        result = api_request("POST", "/auth/logout")
+        print(f"[AUTH] Logged out: {result.get('message', 'Done')}")
+
+
+# ═════════════════════════════════════════════
+# MODULE 2: FINANCIAL MANAGEMENT
+# ═════════════════════════════════════════════
+@dataclass
+class JournalEntry:
+    """Represents a double-entry journal posting in TASK ETHICS Finance module."""
+    date:          str          # Format: YYYY-MM-DD
+    description:   str
+    debit_account: str          # Account code, e.g. '1001'
+    credit_account: str         # Account code, e.g. '4001'
+    amount:        float
+    currency:      str = "INR"
+    reference:     str = ""
+    cost_center:   str = ""
+
+
+class FinancialManagement:
+    """
+    Task Ethics Financial Management module.
+    Covers: General Ledger, Journal Entries, Financial Reports.
+    """
+
+    def create_journal_entry(self, entry: JournalEntry) -> dict:
+        """Post a journal entry to the general ledger."""
+        payload = asdict(entry)
+        result  = api_request("POST", "/finance/journal-entries", payload)
+        if "entry_id" in result:
+            print(f"[FINANCE] Journal entry created: ID={result['entry_id']}")
+        else:
+            print(f"[FINANCE] Error: {result.get('error')}")
+        return result
+
+    def get_trial_balance(self, as_of_date: str, company_id: str = "001") -> dict:
+        """
+        Retrieve trial balance as of a given date.
+
+        Args:
+            as_of_date : Date string 'YYYY-MM-DD'
+            company_id : Company/entity identifier
+        """
+        result = api_request("GET", f"/finance/trial-balance?date={as_of_date}&company={company_id}")
+        print(f"[FINANCE] Trial Balance as of {as_of_date}: {len(result.get('accounts', []))} accounts")
+        return result
+
+    def get_profit_loss(self, from_date: str, to_date: str) -> dict:
+        """Generate Profit & Loss statement for a date range."""
+        result = api_request("GET", f"/finance/profit-loss?from={from_date}&to={to_date}")
+        if "summary" in result:
+            s = result["summary"]
+            print(f"[FINANCE] P&L  Revenue: ₹{s.get('revenue', 0):,.2f} | "
+                  f"Expenses: ₹{s.get('expenses', 0):,.2f} | "
+                  f"Net Profit: ₹{s.get('net_profit', 0):,.2f}")
+        return result
+
+    def get_balance_sheet(self, as_of_date: str) -> dict:
+        """Fetch the Balance Sheet as of a specified date."""
+        result = api_request("GET", f"/finance/balance-sheet?date={as_of_date}")
+        print(f"[FINANCE] Balance Sheet fetched for {as_of_date}")
+        return result
+
+
+# ═════════════════════════════════════════════
+# MODULE 3: INVENTORY MANAGEMENT
+# ═════════════════════════════════════════════
+@dataclass
+class InventoryItem:
+    """Represents a product/item in Task Ethics  Inventory."""
+    item_code:    str
+    item_name:    str
+    category:     str
+    unit_of_measure: str          # e.g. 'PCS', 'KG', 'MTR'
+    reorder_level: int
+    reorder_qty:  int
+    hsn_code:     str             # Required for GST compliance
+    gst_rate:     float           # GST percentage: 0, 5, 12, 18, 28
+    unit_price:   float
+    warehouse:    str = "WH-001"
+
+
+class InventoryManagement:
+    """ Task Ethics Inventory Management module."""
+
+    def add_item(self, item: InventoryItem) -> dict:
+        """Create a new inventory item."""
+        result = api_request("POST", "/inventory/items", asdict(item))
+        if "item_id" in result:
+            print(f"[INVENTORY] Item '{item.item_name}' created: ID={result['item_id']}")
+        return result
+
+    def get_stock_levels(self, warehouse: str = None) -> dict:
+        """
+        Get current stock levels, optionally filtered by warehouse.
+
+        Args:
+            warehouse : Warehouse code; if None, returns all warehouses.
+        """
+        endpoint = "/inventory/stock-levels"
+        if warehouse:
+            endpoint += f"?warehouse={warehouse}"
+        result = api_request("GET", endpoint)
+        items = result.get("items", [])
+        print(f"[INVENTORY] Stock levels: {len(items)} items retrieved")
+        for item in items[:5]:   # Preview first 5
+            print(f"  • {item.get('item_name')}: {item.get('quantity')} {item.get('uom')}")
+        return result
+
+    def create_stock_transfer(
+        self, item_code: str, qty: float,
+        from_warehouse: str, to_warehouse: str
+    ) -> dict:
+        """Transfer stock between warehouses."""
+        payload = {
+            "item_code":      item_code,
+            "quantity":       qty,
+            "from_warehouse": from_warehouse,
+            "to_warehouse":   to_warehouse,
+            "transfer_date":  str(date.today()),
+        }
+        result = api_request("POST", "/inventory/stock-transfer", payload)
+        print(f"[INVENTORY] Transfer: {qty} of {item_code}  "
+              f"{from_warehouse} → {to_warehouse}  |  Status: {result.get('status')}")
+        return result
+
+    def get_low_stock_alerts(self) -> List[dict]:
+        """Retrieve items that have fallen below their reorder level."""
+        result = api_request("GET", "/inventory/low-stock-alerts")
+        alerts = result.get("alerts", [])
+        if alerts:
+            print(f"[INVENTORY] ⚠ {len(alerts)} items below reorder level:")
+            for a in alerts:
+                print(f"  • {a['item_name']}: Current={a['current_qty']}, "
+                      f"Reorder Level={a['reorder_level']}")
+        else:
+            print("[INVENTORY] All items are adequately stocked.")
+        return alerts
+
+
+# ═════════════════════════════════════════════
+# MODULE 4: SALES MANAGEMENT
+# ═════════════════════════════════════════════
+@dataclass
+class SalesOrderLine:
+    item_code: str
+    item_name: str
+    qty:       float
+    unit_price: float
+    gst_rate:  float     # GST %
+    discount:  float = 0.0
+
+    @property
+    def taxable_amount(self) -> float:
+        return (self.qty * self.unit_price) * (1 - self.discount / 100)
+
+    @property
+    def gst_amount(self) -> float:
+        return self.taxable_amount * (self.gst_rate / 100)
+
+    @property
+    def total(self) -> float:
+        return self.taxable_amount + self.gst_amount
+
+
+@dataclass
+class SalesOrder:
+    customer_id:  str
+    order_date:   str
+    delivery_date: str
+    items:        List[SalesOrderLine] = field(default_factory=list)
+    notes:        str = ""
+
+    @property
+    def grand_total(self) -> float:
+        return sum(line.total for line in self.items)
+
+
+class SalesManagement:
+    """Task Ethics  Sales Management module."""
+
+    def create_sales_order(self, order: SalesOrder) -> dict:
+        """Submit a new sales order."""
+        payload = {
+            "customer_id":   order.customer_id,
+            "order_date":    order.order_date,
+            "delivery_date": order.delivery_date,
+            "notes":         order.notes,
+            "items": [
+                {
+                    "item_code":      line.item_code,
+                    "item_name":      line.item_name,
+                    "qty":            line.qty,
+                    "unit_price":     line.unit_price,
+                    "discount":       line.discount,
+                    "gst_rate":       line.gst_rate,
+                    "taxable_amount": line.taxable_amount,
+                    "gst_amount":     line.gst_amount,
+                    "total":          line.total,
+                }
+                for line in order.items
+            ],
+            "grand_total": order.grand_total,
+        }
+        result = api_request("POST", "/sales/orders", payload)
+        print(f"[SALES] Order created for customer {order.customer_id} | "
+              f"Total: ₹{order.grand_total:,.2f} | ID: {result.get('order_id')}")
+        return result
+
+    def generate_invoice(self, order_id: str) -> dict:
+        """Generate a GST-compliant tax invoice from a confirmed sales order."""
+        result = api_request("POST", f"/sales/orders/{order_id}/invoice")
+        print(f"[SALES] Invoice generated: {result.get('invoice_number')} | "
+              f"Amount: ₹{result.get('invoice_amount', 0):,.2f}")
+        return result
+
+    def get_sales_dashboard(self, period: str = "this_month") -> dict:
+        """
+        Retrieve sales KPIs and analytics.
+
+        Args:
+            period : 'today', 'this_week', 'this_month', 'this_year'
+        """
+        result = api_request("GET", f"/sales/dashboard?period={period}")
+        if "kpis" in result:
+            k = result["kpis"]
+            print(f"[SALES] Dashboard ({period}): "
+                  f"Orders={k.get('total_orders')} | "
+                  f"Revenue=₹{k.get('total_revenue', 0):,.2f} | "
+                  f"Avg Order=₹{k.get('avg_order_value', 0):,.2f}")
+        return result
+
+
+# ═════════════════════════════════════════════
+# MODULE 5: PROCUREMENT MANAGEMENT
+# ═════════════════════════════════════════════
+@dataclass
+class PurchaseOrderLine:
+    item_code:  str
+    item_name:  str
+    qty:        float
+    unit_price: float
+    gst_rate:   float
+
+
+@dataclass
+class PurchaseOrder:
+    vendor_id:     str
+    order_date:    str
+    expected_date: str
+    items:         List[PurchaseOrderLine] = field(default_factory=list)
+    payment_terms: str = "NET30"
+
+    @property
+    def total_amount(self) -> float:
+        return sum(
+            (line.qty * line.unit_price) * (1 + line.gst_rate / 100)
+            for line in self.items
+        )
+
+
+class ProcurementManagement:
+    """Task Ethics Procurement Management module."""
+
+    def create_purchase_order(self, po: PurchaseOrder) -> dict:
+        """Submit a new purchase order to a vendor."""
+        payload = {
+            "vendor_id":     po.vendor_id,
+            "order_date":    po.order_date,
+            "expected_date": po.expected_date,
+            "payment_terms": po.payment_terms,
+            "total_amount":  po.total_amount,
+            "items": [
+                {
+                    "item_code":  line.item_code,
+                    "item_name":  line.item_name,
+                    "qty":        line.qty,
+                    "unit_price": line.unit_price,
+                    "gst_rate":   line.gst_rate,
+                    "line_total": (line.qty * line.unit_price) * (1 + line.gst_rate / 100),
+                }
+                for line in po.items
+            ],
+        }
+        result = api_request("POST", "/procurement/purchase-orders", payload)
+        print(f"[PROCUREMENT] PO created for vendor {po.vendor_id} | "
+              f"Total: ₹{po.total_amount:,.2f} | PO#: {result.get('po_number')}")
+        return result
+
+    def approve_purchase_order(self, po_id: str, approver_id: str) -> dict:
+        """Approve a pending purchase order."""
+        payload = {"approver_id": approver_id, "approved_at": str(datetime.now())}
+        result  = api_request("PUT", f"/procurement/purchase-orders/{po_id}/approve", payload)
+        print(f"[PROCUREMENT] PO {po_id} approved by {approver_id}: {result.get('status')}")
+        return result
+
+    def receive_goods(self, po_id: str, received_items: List[dict]) -> dict:
+        """
+        Record goods receipt against a purchase order.
+
+        Args:
+            po_id          : Purchase order ID
+            received_items : List of dicts: [{"item_code": ..., "received_qty": ...}]
+        """
+        payload = {
+            "po_id":          po_id,
+            "receipt_date":   str(date.today()),
+            "received_items": received_items,
+        }
+        result = api_request("POST", "/procurement/goods-receipt", payload)
+        print(f"[PROCUREMENT] Goods received for PO {po_id}: GRN={result.get('grn_number')}")
+        return result
+
+
+# ═════════════════════════════════════════════
+# MODULE 6: HR & PAYROLL MANAGEMENT
+# ═════════════════════════════════════════════
+@dataclass
+class Employee:
+    employee_code: str
+    first_name:    str
+    last_name:     str
+    department:    str
+    designation:   str
+    date_of_joining: str
+    basic_salary:  float
+    email:         str
+    mobile:        str
+    pan_number:    str    # Required for Indian payroll TDS
+    uan_number:    str    # Universal Account Number for PF
+
+
+class HRPayrollManagement:
+    """ Task Ehics  HR & Payroll Management module."""
+
+    def onboard_employee(self, emp: Employee) -> dict:
+        """Create a new employee record in the HRMS."""
+        result = api_request("POST", "/hr/employees", asdict(emp))
+        if "employee_id" in result:
+            print(f"[HR] Employee '{emp.first_name} {emp.last_name}' "
+                  f"onboarded: ID={result['employee_id']}")
+        return result
+
+    def process_payroll(self, month: int, year: int, department: str = None) -> dict:
+        """
+        Run monthly payroll for all employees or a specific department.
+
+        Args:
+            month      : Payroll month (1-12)
+            year       : Payroll year
+            department : Optional department filter
+        """
+        payload = {
+            "month":      month,
+            "year":       year,
+            "department": department,
+            "run_date":   str(date.today()),
+        }
+        result = api_request("POST", "/hr/payroll/run", payload)
+        if "summary" in result:
+            s = result["summary"]
+            print(f"[HR] Payroll {month}/{year}: "
+                  f"Employees={s.get('employee_count')} | "
+                  f"Gross=₹{s.get('total_gross', 0):,.2f} | "
+                  f"Net=₹{s.get('total_net', 0):,.2f} | "
+                  f"TDS=₹{s.get('total_tds', 0):,.2f} | "
+                  f"PF=₹{s.get('total_pf', 0):,.2f}")
+        return result
+
+    def mark_attendance(self, employee_id: str, check_in: str, check_out: str) -> dict:
+        """
+        Record employee attendance for a day.
+
+        Args:
+            employee_id : Employee ID
+            check_in    : Check-in datetime string 'YYYY-MM-DD HH:MM'
+            check_out   : Check-out datetime string 'YYYY-MM-DD HH:MM'
+        """
+        payload = {
+            "employee_id": employee_id,
+            "date":        check_in[:10],
+            "check_in":    check_in,
+            "check_out":   check_out,
+        }
+        result = api_request("POST", "/hr/attendance", payload)
+        print(f"[HR] Attendance for {employee_id}: {check_in} → {check_out} | "
+              f"Hours: {result.get('working_hours', 'N/A')}")
+        return result
+
+    def apply_leave(
+        self, employee_id: str, leave_type: str,
+        from_date: str, to_date: str, reason: str
+    ) -> dict:
+        """Submit a leave application."""
+        payload = {
+            "employee_id": employee_id,
+            "leave_type":  leave_type,   # 'CL', 'SL', 'EL', 'LWP'
+            "from_date":   from_date,
+            "to_date":     to_date,
+            "reason":      reason,
+        }
+        result = api_request("POST", "/hr/leave/apply", payload)
+        print(f"[HR] Leave applied for {employee_id}: {from_date} to {to_date} | "
+              f"Status: {result.get('status')}")
+        return result
+
+
+# ═════════════════════════════════════════════
+# MODULE 7: CRM — CUSTOMER RELATIONSHIP MANAGEMENT
+# ═════════════════════════════════════════════
+@dataclass
+class Lead:
+    name:         str
+    company:      str
+    email:        str
+    mobile:       str
+    source:       str      # 'website', 'referral', 'campaign', 'cold_call'
+    industry:     str
+    estimated_value: float
+    assigned_to:  str      # Sales rep user ID
+
+
+class CRMManagement:
+    """Task Ethics  ERP CRM module — Lead, Opportunity, and Customer management."""
+
+    def create_lead(self, lead: Lead) -> dict:
+        """Register a new sales lead."""
+        result = api_request("POST", "/crm/leads", asdict(lead))
+        print(f"[CRM] Lead '{lead.name}' ({lead.company}) created: "
+              f"ID={result.get('lead_id')} | Value=₹{lead.estimated_value:,.0f}")
+        return result
+
+    def convert_lead_to_opportunity(self, lead_id: str, expected_close: str) -> dict:
+        """Convert a qualified lead into a sales opportunity."""
+        payload = {
+            "lead_id":        lead_id,
+            "expected_close": expected_close,
+            "stage":          "Proposal",
+        }
+        result = api_request("POST", f"/crm/leads/{lead_id}/convert", payload)
+        print(f"[CRM] Lead {lead_id} converted to Opportunity: {result.get('opportunity_id')}")
+        return result
+
+    def get_sales_pipeline(self) -> dict:
+        """Retrieve the full sales pipeline grouped by stage."""
+        result = api_request("GET", "/crm/pipeline")
+        stages = result.get("stages", [])
+        print("[CRM] Sales Pipeline:")
+        for stage in stages:
+            print(f"  • {stage['name']}: {stage['count']} deals | "
+                  f"₹{stage.get('total_value', 0):,.0f}")
+        return result
+
+    def log_customer_interaction(
+        self, customer_id: str, interaction_type: str, notes: str
+    ) -> dict:
+        """
+        Log a customer interaction (call, meeting, email, demo).
+
+        Args:
+            customer_id       : Customer/Lead ID
+            interaction_type  : 'call', 'email', 'meeting', 'demo'
+            notes             : Interaction notes/summary
+        """
+        payload = {
+            "customer_id":      customer_id,
+            "interaction_type": interaction_type,
+            "notes":            notes,
+            "logged_at":        str(datetime.now()),
+        }
+        result = api_request("POST", "/crm/interactions", payload)
+        print(f"[CRM] Interaction logged for {customer_id}: {interaction_type}")
+        return result
+
+
+# ═════════════════════════════════════════════
+# MODULE 8: GST COMPLIANCE
+# ═════════════════════════════════════════════
+class GSTCompliance:
+    """
+    Task Ethics  GST module.
+    Covers GSTR-1, GSTR-3B generation and e-invoicing.
+    """
+
+    def generate_gstr1(self, month: int, year: int) -> dict:
+        """
+        Generate GSTR-1 (outward supplies return) for a given month.
+
+        Args:
+            month : Return month (1-12)
+            year  : Return year
+        """
+        payload = {"month": month, "year": year}
+        result  = api_request("POST", "/gst/gstr1/generate", payload)
+        if "summary" in result:
+            s = result["summary"]
+            print(f"[GST] GSTR-1 {month}/{year}: "
+                  f"B2B=₹{s.get('b2b_sales', 0):,.2f} | "
+                  f"B2C=₹{s.get('b2c_sales', 0):,.2f} | "
+                  f"Total Tax=₹{s.get('total_tax', 0):,.2f}")
+        return result
+
+    def generate_gstr3b(self, month: int, year: int) -> dict:
+        """Generate GSTR-3B (monthly summary return)."""
+        payload = {"month": month, "year": year}
+        result  = api_request("POST", "/gst/gstr3b/generate", payload)
+        if "liability" in result:
+            l = result["liability"]
+            print(f"[GST] GSTR-3B {month}/{year}: "
+                  f"CGST=₹{l.get('cgst', 0):,.2f} | "
+                  f"SGST=₹{l.get('sgst', 0):,.2f} | "
+                  f"IGST=₹{l.get('igst', 0):,.2f} | "
+                  f"ITC=₹{l.get('itc', 0):,.2f}")
+        return result
+
+    def generate_e_invoice(self, invoice_id: str) -> dict:
+        """
+        Generate a government-compliant e-invoice with IRN and QR code.
+
+        Args:
+            invoice_id : Sales invoice ID from TASK ETHICS
+        """
+        result = api_request("POST", f"/gst/e-invoice/{invoice_id}/generate")
+        if "irn" in result:
+            print(f"[GST] E-Invoice generated: IRN={result['irn']} | "
+                  f"Ack No={result.get('ack_number')} | "
+                  f"QR Code: {'Available' if result.get('qr_code') else 'Pending'}")
+        return result
+
+    def calculate_gst(self, base_amount: float, gst_rate: float, is_interstate: bool) -> dict:
+        """
+        Utility: Calculate GST split (CGST+SGST for intra-state, IGST for inter-state).
+
+        Args:
+            base_amount   : Taxable value before GST
+            gst_rate      : GST rate (e.g., 18 for 18%)
+            is_interstate : True = IGST, False = CGST + SGST
+
+        Returns:
+            dict with tax components and total
+        """
+        total_tax = base_amount * gst_rate / 100
+        if is_interstate:
+            result = {
+                "base_amount": base_amount,
+                "igst":        round(total_tax, 2),
+                "cgst":        0,
+                "sgst":        0,
+                "total_tax":   round(total_tax, 2),
+                "grand_total": round(base_amount + total_tax, 2),
+            }
+        else:
+            half_tax = total_tax / 2
+            result = {
+                "base_amount": base_amount,
+                "igst":        0,
+                "cgst":        round(half_tax, 2),
+                "sgst":        round(half_tax, 2),
+                "total_tax":   round(total_tax, 2),
+                "grand_total": round(base_amount + total_tax, 2),
+            }
+        return result
+
+
+# ═════════════════════════════════════════════
+# DEMO RUNNER — Illustrates all modules
+# ═════════════════════════════════════════════
+def run_task_ethics_demo():
+    """
+    Demonstrates all major TASK ETHICS modules with sample data.
+    In production, replace placeholder values and credentials.
+    """
+    print("=" * 60)
+    print("  Task Ethics — Python Integration Demo")
+    print("  https://tasksoft.in")
+    print("=" * 60)
+
+    # ── 1. Authentication ──────────────────────
+    print("\n[1] Authentication")
+    auth = TaskAuth("admin@yourcompany.in", "SecurePass@123", "COMP001")
+    auth.login()
+
+    # ── 2. Finance: Post a journal entry ──────
+    print("\n[2] Financial Management")
+    finance = FinancialManagement()
+    journal = JournalEntry(
+        date="2026-06-01",
+        description="Sales revenue recognition - June",
+        debit_account="1200",     # Accounts Receivable
+        credit_account="4001",    # Sales Revenue
+        amount=150000.00,
+        currency="INR",
+        reference="SO-2026-0601",
+    )
+    finance.create_journal_entry(journal)
+    finance.get_trial_balance("2026-06-01")
+    finance.get_profit_loss("2026-04-01", "2026-06-01")
+
+    # ── 3. Inventory ───────────────────────────
+    print("\n[3] Inventory Management")
+    inventory = InventoryManagement()
+    new_item = InventoryItem(
+        item_code="ITM-001",
+        item_name="Industrial Drill Bit Set",
+        category="Tools",
+        unit_of_measure="SET",
+        reorder_level=10,
+        reorder_qty=50,
+        hsn_code="82079090",
+        gst_rate=18.0,
+        unit_price=2500.00,
+        warehouse="WH-001",
+    )
+    inventory.add_item(new_item)
+    inventory.get_stock_levels(warehouse="WH-001")
+    inventory.get_low_stock_alerts()
+
+    # ── 4. Sales ───────────────────────────────
+    print("\n[4] Sales Management")
+    sales = SalesManagement()
+    order = SalesOrder(
+        customer_id="CUST-0042",
+        order_date="2026-06-11",
+        delivery_date="2026-06-20",
+        items=[
+            SalesOrderLine("ITM-001", "Industrial Drill Bit Set", 5, 2500.00, 18.0),
+            SalesOrderLine("ITM-002", "Safety Gloves (Pack of 12)", 10, 450.00, 12.0, discount=5),
+        ],
+    )
+    so_result = sales.create_sales_order(order)
+    if "order_id" in so_result:
+        sales.generate_invoice(so_result["order_id"])
+    sales.get_sales_dashboard("this_month")
+
+    # ── 5. Procurement ─────────────────────────
+    print("\n[5] Procurement Management")
+    procurement = ProcurementManagement()
+    po = PurchaseOrder(
+        vendor_id="VEND-0015",
+        order_date="2026-06-11",
+        expected_date="2026-06-25",
+        items=[
+            PurchaseOrderLine("ITM-001", "Industrial Drill Bit Set", 100, 1800.00, 18.0),
+        ],
+        payment_terms="NET45",
+    )
+    po_result = procurement.create_purchase_order(po)
+    if "po_id" in po_result:
+        procurement.approve_purchase_order(po_result["po_id"], "MGR-001")
+
+    # ── 6. HR & Payroll ────────────────────────
+    print("\n[6] HR & Payroll Management")
+    hr = HRPayrollManagement()
+    emp = Employee(
+        employee_code="EMP-1001",
+        first_name="Priya",
+        last_name="Sharma",
+        department="Engineering",
+        designation="Senior Software Engineer",
+        date_of_joining="2024-03-01",
+        basic_salary=85000.00,
+        email="priya.sharma@yourcompany.in",
+        mobile="9876543210",
+        pan_number="ABCDE1234F",
+        uan_number="100123456789",
+    )
+    hr.onboard_employee(emp)
+    hr.mark_attendance("EMP-1001", "2026-06-11 09:05", "2026-06-11 18:30")
+    hr.process_payroll(month=5, year=2026, department="Engineering")
+    hr.apply_leave("EMP-1001", "CL", "2026-06-20", "2026-06-21", "Personal work")
+
+    # ── 7. CRM ─────────────────────────────────
+    print("\n[7] CRM")
+    crm = CRMManagement()
+    lead = Lead(
+        name="Rajesh Kumar",
+        company="TechVision Pvt Ltd",
+        email="rajesh@techvision.in",
+        mobile="9988776655",
+        source="website",
+        industry="Manufacturing",
+        estimated_value=500000.00,
+        assigned_to="SALES-003",
+    )
+    lead_result = crm.create_lead(lead)
+    if "lead_id" in lead_result:
+        crm.convert_lead_to_opportunity(lead_result["lead_id"], "2026-07-31")
+    crm.get_sales_pipeline()
+
+    # ── 8. GST Compliance ──────────────────────
+    print("\n[8] GST Compliance")
+    gst = GSTCompliance()
+
+    # Calculate GST breakdown before invoicing
+    gst_calc = gst.calculate_gst(100000.00, 18.0, is_interstate=False)
+    print(f"[GST] Calculation: Base=₹{gst_calc['base_amount']:,.2f} | "
+          f"CGST=₹{gst_calc['cgst']:,.2f} | "
+          f"SGST=₹{gst_calc['sgst']:,.2f} | "
+          f"Grand Total=₹{gst_calc['grand_total']:,.2f}")
+
+    gst.generate_gstr1(month=5, year=2026)
+    gst.generate_gstr3b(month=5, year=2026)
+
+    print("\n" + "=" * 60)
+    print("  Task Ethics Demo Complete.")
+    print("=" * 60)
+
+
+if __name__ == "__main__":
+    run_task_ethics_demo()
