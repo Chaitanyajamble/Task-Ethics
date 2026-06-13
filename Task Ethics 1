@@ -3,7 +3,7 @@ import os
 import json
 from datetime import date
 from dotenv import load_dotenv
-from openai import OpenAI # swap for anthropic if preferred
+from openai import OpenAI 
 
 load_dotenv()
 
