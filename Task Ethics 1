@@ -1,0 +1,572 @@
+
+import os
+import json
+from datetime import date
+from dotenv import load_dotenv
+from openai import OpenAI # swap for anthropic if preferred
+
+load_dotenv()
+
+# ─────────────────────────────────────────────────────────────────────────────
+# BASE CLIENT
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TaskLLMClient:
+    """Thin wrapper around the LLM API for TASK ETHICS use-cases."""
+
+    def __init__(self, model: str = "gpt-4o"):
+        self.client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        self.model = model
+
+    def chat(self, system: str, user: str, temperature: float = 0.3) -> str:
+        response = self.client.chat.completions.create(
+            model=self.model,
+            temperature=temperature,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+        )
+        return response.choices[0].message.content.strip()
+
+    def chat_json(self, system: str, user: str) -> dict:
+        """Returns parsed JSON. Prompt must instruct model to return only JSON."""
+        raw = self.chat(system, user + "\n\nRespond ONLY with valid JSON.", temperature=0.0)
+        # strip optional markdown fences
+        raw = raw.strip().lstrip("```json").lstrip("```").rstrip("```").strip()
+        return json.loads(raw)
+
+
+llm = TaskLLMClient()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 1. FINANCIAL MANAGEMENT — AI CFO Assistant
+# ─────────────────────────────────────────────────────────────────────────────
+
+class FinancialAI:
+    """
+    Use-cases:
+      • Summarise P&L in plain English for CFO / management
+      • Detect budget overruns and suggest corrective actions
+      • Auto-classify GL entries
+      • GST compliance Q&A
+    """
+
+    SYSTEM = (
+        "You are an expert finance controller integrated with TASK ETHICS. "
+        "You understand Indian accounting standards, GST regulations, and "
+        "multi-entity financial consolidation. Be concise and accurate."
+    )
+
+    def summarise_pnl(self, pnl_data: dict) -> str:
+        """
+        pnl_data example:
+          {"revenue": 5000000, "cogs": 3200000, "opex": 900000,
+           "period": "Q1 FY2025-26", "currency": "INR"}
+        """
+        prompt = (
+            f"Here is the P&L summary for {pnl_data['period']}:\n"
+            f" Revenue : ₹{pnl_data['revenue']:,}\n"
+            f" COGS : ₹{pnl_data['cogs']:,}\n"
+            f" OpEx : ₹{pnl_data['opex']:,}\n"
+            f" Net : ₹{pnl_data['revenue'] - pnl_data['cogs'] - pnl_data['opex']:,}\n\n"
+            "Write a 3-sentence management-level summary highlighting performance, "
+            "gross margin %, and one actionable recommendation."
+        )
+        return llm.chat(self.SYSTEM, prompt)
+
+    def classify_gl_entry(self, description: str, amount: float) -> dict:
+        """Auto-classify a journal description into a GL account code."""
+        prompt = (
+            f"Transaction description: '{description}'\n"
+            f"Amount: ₹{amount:,.2f}\n\n"
+            "Return JSON with keys: gl_account_code, gl_account_name, "
+            "cost_center, gst_applicable (bool), confidence (0-1)."
+        )
+        return llm.chat_json(self.SYSTEM, prompt)
+
+    def budget_variance_insight(self, budget: float, actual: float, category: str) -> str:
+        variance_pct = ((actual - budget) / budget) * 100
+        prompt = (
+            f"Category: {category}\n"
+            f"Budget: ₹{budget:,} | Actual: ₹{actual:,} | "
+            f"Variance: {variance_pct:+.1f}%\n\n"
+            "In 2 sentences explain the risk level and suggest one corrective action."
+        )
+        return llm.chat(self.SYSTEM, prompt)
+
+    def gst_compliance_query(self, question: str) -> str:
+        """Answer GST-related queries in plain language."""
+        return llm.chat(
+            self.SYSTEM + " Focus strictly on India GST rules.",
+            question,
+            temperature=0.1,
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 2. HR & PAYROLL — Smart HR Assistant
+# ─────────────────────────────────────────────────────────────────────────────
+
+class HRPayrollAI:
+    """
+    Use-cases:
+      • Generate offer letters / HR correspondence
+      • Explain payslip deductions to employees (ESS portal chatbot)
+      • Flag leave anomalies or overtime policy breaches
+      • Summarise attrition trends
+    """
+
+    SYSTEM = (
+        "You are an HR specialist and payroll expert for an Indian SME using TASK ETHICS. "
+        "You understand PF, ESI, TDS on salary, gratuity, and Indian labour laws."
+    )
+
+    def explain_payslip(self, payslip: dict) -> str:
+        """
+        payslip example:
+          {"employee": "Ravi Kumar", "basic": 40000, "hra": 16000,
+           "pf_deduction": 4800, "tds": 3200, "net_pay": 48000, "month": "May 2026"}
+        """
+        prompt = (
+            f"Employee: {payslip['employee']} | Month: {payslip['month']}\n"
+            f"Basic: ₹{payslip['basic']:,} HRA: ₹{payslip['hra']:,}\n"
+            f"PF Deduction: ₹{payslip['pf_deduction']:,} TDS: ₹{payslip['tds']:,}\n"
+            f"Net Pay: ₹{payslip['net_pay']:,}\n\n"
+            "Explain each component in simple language an employee can understand. "
+            "Use bullet points. Max 150 words."
+        )
+        return llm.chat(self.SYSTEM, prompt)
+
+    def generate_offer_letter(self, candidate: dict) -> str:
+        """
+        candidate: {"name", "role", "department", "ctc", "joining_date", "location"}
+        """
+        prompt = (
+            f"Generate a professional offer letter for:\n"
+            f" Name : {candidate['name']}\n"
+            f" Role : {candidate['role']}\n"
+            f" Department : {candidate['department']}\n"
+            f" Annual CTC : ₹{candidate['ctc']:,}\n"
+            f" Joining Date: {candidate['joining_date']}\n"
+            f" Location : {candidate['location']}\n\n"
+            "Company name is PACT Software Services Pvt. Ltd. Use formal tone."
+        )
+        return llm.chat(self.SYSTEM, prompt, temperature=0.5)
+
+    def flag_leave_anomaly(self, employee_leave_log: list[dict]) -> str:
+        """
+        leave_log: [{"date": "2026-05-12", "type": "sick", "approved": True}, ...]
+        """
+        prompt = (
+            f"Analyse this leave log and identify any anomalies or policy concerns:\n"
+            f"{json.dumps(employee_leave_log, indent=2)}\n\n"
+            "Mention patterns like Monday/Friday absences, excessive sick leaves, "
+            "or unapproved leaves. Be factual."
+        )
+        return llm.chat(self.SYSTEM, prompt)
+
+    def attrition_summary(self, attrition_data: list[dict]) -> str:
+        """attrition_data: [{"dept": str, "resigned": int, "total": int, "month": str}]"""
+        prompt = (
+            f"Attrition data across departments:\n"
+            f"{json.dumps(attrition_data, indent=2)}\n\n"
+            "Provide a 3-bullet summary of risk areas and one retention recommendation."
+        )
+        return llm.chat(self.SYSTEM, prompt)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 3. CRM — AI Sales & Customer Intelligence
+# ─────────────────────────────────────────────────────────────────────────────
+
+class CRMAI:
+    """
+    Use-cases:
+      • Score leads and explain reasoning
+      • Draft personalised follow-up emails
+      • Analyse customer sentiment from interaction notes
+      • Predict deal closure likelihood
+    """
+
+    SYSTEM = (
+        "You are a CRM intelligence engine embedded in TASK ETHICS's sales module. "
+        "Your role is to help sales teams close deals faster and improve customer relationships."
+    )
+
+    def score_lead(self, lead: dict) -> dict:
+        """
+        lead: {"company", "industry", "employees", "annual_revenue",
+               "source", "interactions", "budget_confirmed": bool, "days_in_pipeline": int}
+        """
+        prompt = (
+            f"Score this lead out of 100:\n{json.dumps(lead, indent=2)}\n\n"
+            "Return JSON: score (int 0-100), tier ('Hot'|'Warm'|'Cold'), "
+            "top_reason (str), next_action (str)."
+        )
+        return llm.chat_json(self.SYSTEM, prompt)
+
+    def draft_followup_email(self, context: dict) -> str:
+        """
+        context: {"contact_name", "company", "last_meeting_summary",
+                  "product_interest", "salesperson_name"}
+        """
+        prompt = (
+            f"Write a short, professional follow-up email:\n"
+            f" To : {context['contact_name']} ({context['company']})\n"
+            f" From : {context['salesperson_name']}\n"
+            f" Last meeting summary: {context['last_meeting_summary']}\n"
+            f" Product interest: {context['product_interest']}\n\n"
+            "Keep it under 120 words. End with a clear call-to-action."
+        )
+        return llm.chat(self.SYSTEM, prompt, temperature=0.6)
+
+    def analyse_sentiment(self, interaction_notes: str) -> dict:
+        """Returns sentiment label and key concerns extracted from CRM notes."""
+        prompt = (
+            f"CRM Interaction Notes:\n{interaction_notes}\n\n"
+            "Return JSON: sentiment ('Positive'|'Neutral'|'Negative'), "
+            "key_concerns (list of str), urgency_level ('High'|'Medium'|'Low'), "
+            "recommended_action (str)."
+        )
+        return llm.chat_json(self.SYSTEM, prompt)
+
+    def predict_deal_closure(self, deal: dict) -> dict:
+        """deal: {"value", "stage", "days_open", "competitor_involved", "decision_maker_engaged"}"""
+        prompt = (
+            f"Predict deal closure for:\n{json.dumps(deal, indent=2)}\n\n"
+            "Return JSON: closure_probability (int 0-100), "
+            "expected_close_weeks (int), risk_factors (list of str)."
+        )
+        return llm.chat_json(self.SYSTEM, prompt)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 4. INVENTORY & PROCUREMENT 
+# ─────────────────────────────────────────────────────────────────────────────
+
+class InventoryAI:
+    """
+    Use-cases:
+      • Demand forecasting narrative
+      • Auto-generate purchase orders from low-stock triggers
+      • Supplier evaluation summary
+      • Warehouse slotting recommendations
+    """
+
+    SYSTEM = (
+        "You are a supply chain analyst integrated into TASK ETHICS. "
+        "You help Indian SMEs optimise inventory, reduce stockouts, "
+        "and negotiate better with suppliers."
+    )
+
+    def demand_forecast_narrative(self, item: str, sales_history: list[int]) -> str:
+        """
+        sales_history: monthly units sold, oldest → newest, e.g. [120, 135, 110, 150, 170]
+        """
+        months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+        history_str = ", ".join(
+            f"{months[i % 12]}: {v}" for i, v in enumerate(sales_history)
+        )
+        prompt = (
+            f"Item: {item}\nSales history (units): {history_str}\n\n"
+            "Forecast next 3 months demand, explain the trend, and recommend "
+            "a reorder point. Keep it under 100 words."
+        )
+        return llm.chat(self.SYSTEM, prompt)
+
+    def generate_purchase_order_draft(self, low_stock_items: list[dict]) -> str:
+        """
+        low_stock_items: [{"sku", "name", "current_stock", "reorder_qty", "preferred_supplier"}]
+        """
+        prompt = (
+            f"Generate a purchase order draft for the following low-stock items:\n"
+            f"{json.dumps(low_stock_items, indent=2)}\n\n"
+            "Format as a clean PO table with columns: SKU, Item, Qty to Order, "
+            "Supplier. Add a brief justification note at the top."
+        )
+        return llm.chat(self.SYSTEM, prompt)
+
+    def evaluate_supplier(self, supplier_data: dict) -> dict:
+        """
+        supplier_data: {"name", "on_time_delivery_pct", "defect_rate_pct",
+                         "avg_lead_days", "payment_terms", "years_of_relation"}
+        """
+        prompt = (
+            f"Evaluate this supplier:\n{json.dumps(supplier_data, indent=2)}\n\n"
+            "Return JSON: overall_score (int 0-100), grade ('A'|'B'|'C'|'D'), "
+            "strengths (list), risks (list), recommendation (str)."
+        )
+        return llm.chat_json(self.SYSTEM, prompt)
+
+    def warehouse_slotting_advice(self, warehouse_data: dict) -> str:
+        """
+        warehouse_data: {"fast_moving_items": list, "slow_moving_items": list,
+                          "zones": ["A","B","C"], "picking_frequency": dict}
+        """
+        prompt = (
+            f"Warehouse layout data:\n{json.dumps(warehouse_data, indent=2)}\n\n"
+            "Recommend optimal zone assignment for items to minimise picker travel time. "
+            "Use ABC analysis logic. Max 150 words."
+        )
+        return llm.chat(self.SYSTEM, prompt)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 5. BUSINESS INTELLIGENCE — Natural Language to Insights
+# ─────────────────────────────────────────────────────────────────────────────
+
+class BusinessIntelligenceAI:
+    """
+    Use-cases:
+      • NL query → SQL (for TASK ETHICS database)
+      • Narrate KPI dashboards in plain English
+      • Anomaly detection commentary
+      • Executive report generation
+    """
+
+    SYSTEM = (
+        "You are a Business Intelligence assistant for TASK ETHICS. "
+        "You translate business questions into SQL, explain dashboards, "
+        "and generate executive reports from structured data."
+    )
+
+    # Simplified TASK ETHICS schema excerpt for NL→SQL
+    DB_SCHEMA = """
+    Tables:
+      sales_orders(id, customer_id, order_date, total_amount, status, branch_id)
+      inventory(sku, item_name, qty_on_hand, reorder_level, warehouse_id)
+      employees(id, name, department, salary, hire_date, status)
+      gl_transactions(id, date, account_code, debit, credit, description)
+      customers(id, name, segment, city, created_at)
+    """
+
+    def nl_to_sql(self, natural_language_query: str) -> str:
+        prompt = (
+            f"Database schema:\n{self.DB_SCHEMA}\n\n"
+            f"User question: {natural_language_query}\n\n"
+            "Write a clean PostgreSQL query that answers the question. "
+            "Return only the SQL statement, no explanation."
+        )
+        return llm.chat(self.SYSTEM, prompt, temperature=0.0)
+
+    def narrate_kpi_dashboard(self, kpis: dict) -> str:
+        """
+        kpis: {"revenue_mtd": 2100000, "revenue_target": 2500000,
+                "orders_count": 412, "avg_order_value": 5097,
+                "top_product": "TASK ETHICS Pro", "csat_score": 4.3}
+        """
+        prompt = (
+            f"KPI snapshot for today ({date.today()}):\n"
+            f"{json.dumps(kpis, indent=2)}\n\n"
+            "Write a 4-sentence executive summary a CEO can read in 30 seconds. "
+            "Highlight wins, gaps, and one priority action."
+        )
+        return llm.chat(self.SYSTEM, prompt)
+
+    def detect_anomaly_comment(self, metric: str, value: float,
+                                historical_avg: float, std_dev: float) -> str:
+        z_score = (value - historical_avg) / std_dev if std_dev else 0
+        prompt = (
+            f"Metric: {metric}\n"
+            f"Today's value: {value}\n"
+            f"Historical avg: {historical_avg} | Std Dev: {std_dev}\n"
+            f"Z-score: {z_score:.2f}\n\n"
+            "In one sentence, explain whether this is an anomaly and what might be causing it."
+        )
+        return llm.chat(self.SYSTEM, prompt)
+
+    def generate_executive_report(self, report_data: dict) -> str:
+        """
+        report_data: monthly rolled-up metrics across Finance, HR, Sales, Ops
+        """
+        prompt = (
+            f"Monthly Business Review data:\n{json.dumps(report_data, indent=2)}\n\n"
+            "Write a structured executive report with sections: "
+            "Financial Performance, Operational Highlights, HR Snapshot, "
+            "Key Risks, and Next Month Priorities. Use professional business language."
+        )
+        return llm.chat(self.SYSTEM, prompt, temperature=0.4)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 6. CUSTOMER SUPPORT CHATBOT (ESS Portal / CRM Service Module)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class ERPSupportChatbot:
+    """
+    Multi-turn chatbot for:
+      • Employee Self-Service (ESS) — leave, payslip, policy queries
+      • Customer-facing — order status, invoice queries, support tickets
+    Maintains conversation history per session.
+    """
+
+    SYSTEM = (
+        "You are Task Assistant, a helpful ERP support bot for Task Software. "
+        "You help employees and customers with queries about orders, invoices, "
+        "leave balances, payslips, and general ERP navigation. "
+        "If you cannot answer, politely escalate to the support team at support@taskethics.com."
+    )
+
+    def __init__(self):
+        self.sessions: dict[str, list[dict]] = {}
+
+    def chat(self, session_id: str, user_message: str) -> str:
+        if session_id not in self.sessions:
+            self.sessions[session_id] = []
+
+        history = self.sessions[session_id]
+        history.append({"role": "user", "content": user_message})
+
+        response = llm.client.chat.completions.create(
+            model=llm.model,
+            messages=[{"role": "system", "content": self.SYSTEM}] + history,
+            temperature=0.4,
+        )
+        reply = response.choices[0].message.content.strip()
+        history.append({"role": "assistant", "content": reply})
+        return reply
+
+    def reset_session(self, session_id: str):
+        self.sessions.pop(session_id, None)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 7. MANUFACTURING — Production AI
+# ─────────────────────────────────────────────────────────────────────────────
+
+class ManufacturingAI:
+    """
+    Use-cases:
+      • Production schedule optimisation narrative
+      • Quality defect root-cause suggestion
+      • BOM (Bill of Materials) description generation
+    """
+
+    SYSTEM = (
+        "You are a manufacturing operations expert integrated with TASK ETHICS. "
+        "You help production managers optimise schedules, reduce waste, and improve quality."
+    )
+
+    def production_schedule_review(self, schedule: list[dict]) -> str:
+        """schedule: [{"work_order", "product", "planned_qty", "actual_qty", "machine", "shift"}]"""
+        prompt = (
+            f"Review this production schedule:\n{json.dumps(schedule, indent=2)}\n\n"
+            "Identify bottlenecks, underperforming work orders, and suggest "
+            "two quick wins. Max 120 words."
+        )
+        return llm.chat(self.SYSTEM, prompt)
+
+    def defect_root_cause(self, defect_report: dict) -> str:
+        """
+        defect_report: {"product", "defect_type", "batch_id", "defect_rate_pct",
+                          "machine_id", "operator", "raw_material_lot"}
+        """
+        prompt = (
+            f"Defect report:\n{json.dumps(defect_report, indent=2)}\n\n"
+            "List the 3 most probable root causes using the 5-Why framework "
+            "and recommend an immediate corrective action."
+        )
+        return llm.chat(self.SYSTEM, prompt)
+
+    def describe_bom(self, bom: list[dict]) -> str:
+        """bom: [{"component", "qty", "unit", "lead_time_days"}]"""
+        prompt = (
+            f"Bill of Materials:\n{json.dumps(bom, indent=2)}\n\n"
+            "Write a plain-English product assembly description suitable "
+            "for a procurement manager. Max 80 words."
+        )
+        return llm.chat(self.SYSTEM, prompt)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Run all modules with sample data
+# ─────────────────────────────────────────────────────────────────────────────
+
+if __name__ == "__main__":
+
+    sep = "\n" + "─" * 68 + "\n"
+
+    print("\n TASK ETHICS — LLM Integration Demo \n")
+
+    # 1. Finance
+    print(" FINANCIAL AI — P&L Summary")
+    fin = FinancialAI()
+    print(fin.summarise_pnl({
+        "revenue": 12_500_000, "cogs": 7_800_000,
+        "opex": 2_100_000, "period": "Q1 FY2026-27", "currency": "INR"
+    }))
+    print(sep)
+
+    print("1️ FINANCIAL AI — GL Auto-Classification")
+    print(fin.classify_gl_entry("Office stationery purchased from Sriram Traders", 4800))
+    print(sep)
+
+    # 2. HR
+    print("HR AI — Payslip Explanation")
+    hr = HRPayrollAI()
+    print(hr.explain_payslip({
+        "employee": "Priya Sharma", "basic": 35000, "hra": 14000,
+        "pf_deduction": 4200, "tds": 2800, "net_pay": 42000, "month": "May 2026"
+    }))
+    print(sep)
+
+    # 3. CRM
+    print("CRM AI — Lead Scoring")
+    crm = CRMAI()
+    print(crm.score_lead({
+        "company": "TechNova Pvt Ltd", "industry": "Manufacturing",
+        "employees": 250, "annual_revenue": 50_000_000,
+        "source": "Inbound Demo Request", "interactions": 4,
+        "budget_confirmed": True, "days_in_pipeline": 18
+    }))
+    print(sep)
+
+    # 4. Inventory
+    print(" INVENTORY AI — Demand Forecast")
+    inv = InventoryAI()
+    print(inv.demand_forecast_narrative(
+        "Industrial Safety Helmets", [80, 95, 102, 88, 115, 130]
+    ))
+    print(sep)
+
+    # 5. Business Intelligence
+    print("BI AI — NL to SQL")
+    bi = BusinessIntelligenceAI()
+    print(bi.nl_to_sql("Show me total sales by city for the last 30 days where order value > 10000"))
+    print(sep)
+
+    print("BI AI — KPI Narrative")
+    print(bi.narrate_kpi_dashboard({
+        "revenue_mtd": 8_400_000, "revenue_target": 10_000_000,
+        "orders_count": 634, "avg_order_value": 13_249,
+        "top_product": "TASK ETHICS Professional", "csat_score": 4.5
+    }))
+    print(sep)
+
+    # 6. Chatbot
+    print("SUPPORT CHATBOT — Multi-turn")
+    bot = ERPSupportChatbot()
+    sid = "emp_001"
+    for q in [
+        "How many casual leaves am I entitled to in a year?",
+        "What happens if I take more than my allowed leaves?",
+    ]:
+        print(f " {q}")
+        print(f" {bot.chat(sid, q)}\n")
+    print(sep)
+
+    # 7. Manufacturing
+    print("MANUFACTURING AI — Defect Root Cause")
+    mfg = ManufacturingAI()
+    print(mfg.defect_root_cause({
+        "product": "PVC Pipe 25mm", "defect_type": "Surface Cracks",
+        "batch_id": "B-2026-0412", "defect_rate_pct": 8.3,
+        "machine_id": "EXT-03", "operator": "Suresh K",
+        "raw_material_lot": "RM-LOT-882"
+    }))
+
+    print("\n TASK ETHICS LLM Integration demo complete.\n")
+
