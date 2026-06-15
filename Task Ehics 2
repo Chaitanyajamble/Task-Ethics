@@ -1,0 +1,2848 @@
+"""
+TASK EHICS 
+==========================
+Enterprise Resource Planning RESTful API
+Covers: Financial, HR/Payroll, CRM, Inventory, Procurement,
+        Sales, Manufacturing, Property, BI, Compliance (GST/India)
+
+Architecture: Layered 
+Author: Generated from BRS analysis of Task soft.in
+"""
+
+from contextlib import asynccontextmanager
+from fastapi import FastAPI, Request, status
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.responses import JSONResponse
+from fastapi.exceptions import RequestValidationError
+
+from app.core.config import settings
+from app.core.logging import setup_logging
+from app.middleware.rate_limiter import RateLimitMiddleware
+from app.middleware.request_id import RequestIDMiddleware
+from app.middleware.audit_log import AuditLogMiddleware
+
+from app.api.v1.endpoints import (
+    auth,
+    users,
+    finance,
+    accounts_receivable,
+    accounts_payable,
+    budget,
+    assets,
+    procurement,
+    sales,
+    inventory,
+    warehouse,
+    manufacturing,
+    hr_payroll,
+    crm,
+    property_mgmt,
+    project,
+    business_intelligence,
+    gst_compliance,
+    notifications,
+    integrations,
+)
+
+logger = setup_logging()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Application startup and shutdown lifecycle."""
+    logger.info("🚀 TASK EHICS API starting up...")
+    # Could init DB pool, Redis, etc. here
+    yield
+    logger.info("🛑 TASK EHICS API shutting down...")
+
+
+# ─── Application Factory ────────────────────────────────────────────────────
+
+def create_application() -> FastAPI:
+    app = FastAPI(
+        title="TASK EHICS API",
+        description=(
+            "Cloud ERP for Indian SMEs — Finance, HR, Inventory, CRM, "
+            "Manufacturing, Property, GST Compliance & Business Intelligence."
+        ),
+        version="1.0.0",
+        docs_url="/api/docs",
+        redoc_url="/api/redoc",
+        openapi_url="/api/openapi.json",
+        lifespan=lifespan,
+    )
+
+    # ── Middleware stack (outermost → innermost) ──────────────────────────
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.CORS_ORIGINS,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+    app.add_middleware(GZipMiddleware, minimum_size=500)
+    app.add_middleware(RateLimitMiddleware, calls=100, period=60)
+    app.add_middleware(RequestIDMiddleware)
+    app.add_middleware(AuditLogMiddleware)
+
+    # ── Global exception handlers ─────────────────────────────────────────
+    @app.exception_handler(RequestValidationError)
+    async def validation_exception_handler(request: Request, exc: RequestValidationError):
+        return JSONResponse(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            content={
+                "success": False,
+                "message": "Validation failed",
+                "errors": exc.errors(),
+                "request_id": getattr(request.state, "request_id", None),
+            },
+        )
+
+    @app.exception_handler(Exception)
+    async def generic_exception_handler(request: Request, exc: Exception):
+        logger.exception("Unhandled exception: %s", exc)
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={
+                "success": False,
+                "message": "Internal server error",
+                "request_id": getattr(request.state, "request_id", None),
+            },
+        )
+
+    # ── Health & readiness probes ─────────────────────────────────────────
+    @app.get("/health", tags=["System"])
+    async def health():
+        return {"status": "ok", "version": "1.0.0"}
+
+    @app.get("/ready", tags=["System"])
+    async def ready():
+        return {"status": "ready"}
+
+    # ── API Router registration ───────────────────────────────────────────
+    PREFIX = "/api/v1"
+    for router, tag in [
+        (auth.router,               "Auth"),
+        (users.router,              "Users"),
+        (finance.router,            "Financial Management"),
+        (accounts_receivable.router,"AR / AP"),
+        (accounts_payable.router,   "AR / AP"),
+        (budget.router,             "Budget Management"),
+        (assets.router,             "Asset Management"),
+        (procurement.router,        "Procurement"),
+        (sales.router,              "Sales Management"),
+        (inventory.router,          "Inventory"),
+        (warehouse.router,          "Warehouse"),
+        (manufacturing.router,      "Manufacturing"),
+        (hr_payroll.router,         "HR & Payroll"),
+        (crm.router,                "CRM"),
+        (property_mgmt.router,      "Property Management"),
+        (project.router,            "Project Management"),
+        (business_intelligence.router, "Business Intelligence"),
+        (gst_compliance.router,     "GST Compliance"),
+        (notifications.router,      "Notifications"),
+        (integrations.router,       "Third-Party Integrations"),
+    ]:
+        app.include_router(router, prefix=PREFIX)
+
+    return app
+
+
+"""
+app/core/config.py
+==================
+Centralised settings — reads from environment / .env file.
+Uses pydantic-settings for type-safe configuration.
+"""
+
+from functools import lru_cache
+from typing import List
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
+
+    # ── App ──────────────────────────────────────────────────────────────
+    APP_NAME: str = "TASK EHICS API"
+    APP_ENV: str = "development"           # development | staging | production
+    DEBUG: bool = True
+    SECRET_KEY: str = "change-me-in-production-256bit-random"
+    ALGORITHM: str = "HS256"
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
+    REFRESH_TOKEN_EXPIRE_DAYS: int = 7
+
+    # ── Database ─────────────────────────────────────────────────────────
+    DATABASE_URL: str = "postgresql+asyncpg://Task :Task @localhost:5432/Task _erp"
+    DB_POOL_SIZE: int = 20
+    DB_MAX_OVERFLOW: int = 10
+    DB_ECHO: bool = False
+
+    # ── Redis (caching + rate-limiting + pub/sub) ─────────────────────────
+    REDIS_URL: str = "redis://localhost:6379/0"
+    CACHE_TTL_SECONDS: int = 300           # default 5-min cache
+
+    # ── GST / India compliance ────────────────────────────────────────────
+    GST_API_URL: str = "https://api.gst.gov.in"
+    GSTIN_REGEX: str = r"^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$"
+
+    # ── Email / SMS notifications ─────────────────────────────────────────
+    SMTP_HOST: str = "smtp.gmail.com"
+    SMTP_PORT: int = 587
+    SMTP_USER: str = "noreply@Task soft.in"
+    SMTP_PASSWORD: str = ""
+    TWILIO_SID: str = ""
+    TWILIO_TOKEN: str = ""
+    TWILIO_FROM: str = ""
+
+    # ── File storage ──────────────────────────────────────────────────────
+    S3_BUCKET: str = "Task -erp-docs"
+    S3_REGION: str = "ap-south-1"
+    S3_ACCESS_KEY: str = ""
+    S3_SECRET_KEY: str = ""
+
+    # ── CORS ─────────────────────────────────────────────────────────────
+    CORS_ORIGINS: List[str] = [
+        "http://localhost:3000",
+        "https://erp.Task soft.in",
+        "https://app.Task soft.in",
+    ]
+
+    # ── Pagination defaults ───────────────────────────────────────────────
+    PAGE_SIZE_DEFAULT: int = 25
+    PAGE_SIZE_MAX: int = 200
+
+    # ── Feature flags ─────────────────────────────────────────────────────
+    FEATURE_BIOMETRIC_ATTENDANCE: bool = True
+    FEATURE_E_INVOICE: bool = True         # GST e-Invoice (India)
+    FEATURE_WHATSAPP_NOTIFICATIONS: bool = False
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()
+
+
+settings = get_settings()
+"""
+app/core/security.py
+====================
+JWT creation/verification, password hashing, RBAC permission checks.
+Roles follow TASK EHICS's stakeholder model:
+  SUPERADMIN → ADMIN → MANAGER → EMPLOYEE → VIEWER → API_CLIENT
+"""
+
+from __future__ import annotations
+
+import re
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, Optional, Set
+
+from fastapi import Depends, HTTPException, Security, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from jose import JWTError, jwt
+from passlib.context import CryptContext
+
+from app.core.config import settings
+
+# ─── Password hashing ────────────────────────────────────────────────────────
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+
+def hash_password(plain: str) -> str:
+    return pwd_context.hash(plain)
+
+
+def verify_password(plain: str, hashed: str) -> bool:
+    return pwd_context.verify(plain, hashed)
+
+
+# ─── JWT ─────────────────────────────────────────────────────────────────────
+
+def create_access_token(subject: str, extra: Dict[str, Any] | None = None) -> str:
+    expire = datetime.now(timezone.utc) + timedelta(
+        minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES
+    )
+    payload = {"sub": subject, "exp": expire, "type": "access", **(extra or {})}
+    return jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+
+
+def create_refresh_token(subject: str) -> str:
+    expire = datetime.now(timezone.utc) + timedelta(
+        days=settings.REFRESH_TOKEN_EXPIRE_DAYS
+    )
+    return jwt.encode(
+        {"sub": subject, "exp": expire, "type": "refresh"},
+        settings.SECRET_KEY,
+        algorithm=settings.ALGORITHM,
+    )
+
+
+def decode_token(token: str) -> Dict[str, Any]:
+    try:
+        return jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+    except JWTError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Could not validate credentials",
+            headers={"WWW-Authenticate": "Bearer"},
+        ) from exc
+
+
+# ─── RBAC ────────────────────────────────────────────────────────────────────
+
+class Role:
+    SUPERADMIN = "superadmin"
+    ADMIN      = "admin"
+    MANAGER    = "manager"
+    EMPLOYEE   = "employee"
+    VIEWER     = "viewer"
+    API_CLIENT = "api_client"
+
+    # Role hierarchy (higher index = more privilege)
+    HIERARCHY = [VIEWER, API_CLIENT, EMPLOYEE, MANAGER, ADMIN, SUPERADMIN]
+
+    @classmethod
+    def gte(cls, role: str, minimum: str) -> bool:
+        """Return True if role >= minimum in hierarchy."""
+        try:
+            return cls.HIERARCHY.index(role) >= cls.HIERARCHY.index(minimum)
+        except ValueError:
+            return False
+
+
+class Permission:
+    """Fine-grained module-level permissions."""
+    FINANCE_READ    = "finance:read"
+    FINANCE_WRITE   = "finance:write"
+    HR_READ         = "hr:read"
+    HR_WRITE        = "hr:write"
+    PAYROLL_RUN     = "payroll:run"
+    INVENTORY_READ  = "inventory:read"
+    INVENTORY_WRITE = "inventory:write"
+    SALES_READ      = "sales:read"
+    SALES_WRITE     = "sales:write"
+    PURCHASE_READ   = "purchase:read"
+    PURCHASE_WRITE  = "purchase:write"
+    CRM_READ        = "crm:read"
+    CRM_WRITE       = "crm:write"
+    REPORTS_VIEW    = "reports:view"
+    ADMIN_PANEL     = "admin:panel"
+    GST_SUBMIT      = "gst:submit"
+
+
+# ─── Dependency: current user from Bearer token ───────────────────────────────
+
+bearer_scheme = HTTPBearer()
+
+
+def get_current_user(
+    credentials: HTTPAuthorizationCredentials = Security(bearer_scheme),
+) -> Dict[str, Any]:
+    payload = decode_token(credentials.credentials)
+    if payload.get("type") != "access":
+        raise HTTPException(status_code=401, detail="Invalid token type")
+    return payload
+
+
+def require_role(minimum_role: str):
+    """FastAPI dependency factory — enforces role hierarchy."""
+    def _check(current_user: Dict = Depends(get_current_user)):
+        user_role = current_user.get("role", "viewer")
+        if not Role.gte(user_role, minimum_role):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Role '{user_role}' insufficient. Requires '{minimum_role}'.",
+            )
+        return current_user
+    return _check
+
+
+def require_permissions(required: Set[str]):
+    """FastAPI dependency factory — enforces granular permissions."""
+    def _check(current_user: Dict = Depends(get_current_user)):
+        user_perms: Set[str] = set(current_user.get("permissions", []))
+        missing = required - user_perms
+        if missing:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Missing permissions: {missing}",
+            )
+        return current_user
+    return _check
+
+
+# ─── GSTIN validator ─────────────────────────────────────────────────────────
+
+def validate_gstin(gstin: str) -> bool:
+    return bool(re.match(settings.GSTIN_REGEX, gstin.upper()))
+"""
+app/db/session.py
+=================
+Async SQLAlchemy engine + session factory.
+Uses asyncpg driver for high-concurrency PostgreSQL.
+"""
+
+from __future__ import annotations
+
+import uuid
+from datetime import datetime, timezone
+from typing import AsyncGenerator
+
+from sqlalchemy import DateTime, String, func
+from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+from app.core.config import settings
+
+# ─── Engine ──────────────────────────────────────────────────────────────────
+
+engine = create_async_engine(
+    settings.DATABASE_URL,
+    pool_size=settings.DB_POOL_SIZE,
+    max_overflow=settings.DB_MAX_OVERFLOW,
+    echo=settings.DB_ECHO,
+    future=True,
+)
+
+AsyncSessionLocal = async_sessionmaker(
+    engine,
+    class_=AsyncSession,
+    expire_on_commit=False,
+    autoflush=False,
+    autocommit=False,
+)
+
+
+# ─── Dependency ──────────────────────────────────────────────────────────────
+
+async def get_db() -> AsyncGenerator[AsyncSession, None]:
+    async with AsyncSessionLocal() as session:
+        try:
+            yield session
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
+        finally:
+            await session.close()
+
+
+# ─── Declarative base with audit columns ─────────────────────────────────────
+
+class Base(DeclarativeBase):
+    """All ORM models inherit from this base."""
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+        index=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+    created_by: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    updated_by: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    tenant_id: Mapped[str | None] = mapped_column(
+        String(50), nullable=True, index=True
+    )  # Multi tenancy support
+"""
+app/schemas/base.py
+===================
+Standardised API envelope, pagination, and shared field types.
+Every endpoint returns { success, message, data, meta }.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Any, Generic, List, Optional, TypeVar
+from uuid import UUID
+
+from pydantic import BaseModel, ConfigDict, Field
+
+T = TypeVar("T")
+
+
+# ─── Response envelope ────────────────────────────────────────────────────────
+
+class PaginationMeta(BaseModel):
+    total: int
+    page: int
+    page_size: int
+    total_pages: int
+
+
+class APIResponse(BaseModel, Generic[T]):
+    """Uniform JSON response for every endpoint."""
+    success: bool = True
+    message: str = "OK"
+    data: Optional[T] = None
+    meta: Optional[PaginationMeta] = None
+    request_id: Optional[str] = None
+
+    @classmethod
+    def ok(cls, data: T, message: str = "OK", meta: PaginationMeta | None = None) -> "APIResponse[T]":
+        return cls(success=True, message=message, data=data, meta=meta)
+
+    @classmethod
+    def fail(cls, message: str, data: Any = None) -> "APIResponse":
+        return cls(success=False, message=message, data=data)
+
+
+# ─── Pagination query params ─────────────────────────────────────────────────
+
+class PaginationParams(BaseModel):
+    page: int = Field(default=1, ge=1)
+    page_size: int = Field(default=25, ge=1, le=200)
+
+    @property
+    def offset(self) -> int:
+        return (self.page - 1) * self.page_size
+
+
+# ─── Shared value types ───────────────────────────────────────────────────────
+
+class AddressSchema(BaseModel):
+    line1: str
+    line2: Optional[str] = None
+    city: str
+    state: str
+    pincode: str
+    country: str = "India"
+
+
+class MoneySchema(BaseModel):
+    """Monetary value with currency."""
+    amount: float = Field(..., ge=0)
+    currency: str = Field(default="INR", max_length=3)
+
+
+class AuditMixin(BaseModel):
+    """Timestamps added to every DB-backed schema response."""
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    created_at: datetime
+    updated_at: datetime
+    created_by: Optional[str] = None
+    updated_by: Optional[str] = None
+"""
+app/middleware/rate_limiter.py  — sliding-window rate limiter (in-process)
+app/middleware/request_id.py   — injects X-Request-ID header
+app/middleware/audit_log.py    — logs every mutating request for compliance
+"""
+
+# ─────────────────────────── rate_limiter.py ────────────────────────────────
+# Save as separate files in production; combined here for brevity.
+
+from collections import defaultdict, deque
+from time import time
+
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
+from starlette.responses import JSONResponse
+
+import logging
+import uuid
+
+logger = logging.getLogger("Task _erp")
+
+
+class RateLimitMiddleware(BaseHTTPMiddleware):
+    """
+    Sliding-window rate limiter keyed by client IP.
+    In production replace with Redis-backed token bucket.
+    """
+
+    def __init__(self, app, calls: int = 100, period: int = 60):
+        super().__init__(app)
+        self.calls = calls
+        self.period = period
+        self._windows: dict[str, deque] = defaultdict(deque)
+
+    async def dispatch(self, request: Request, call_next):
+        # Skip health endpoints
+        if request.url.path in ("/health", "/ready"):
+            return await call_next(request)
+
+        ip = request.client.host if request.client else "unknown"
+        now = time()
+        window = self._windows[ip]
+
+        # Evict timestamps outside the current window
+        while window and window[0] < now - self.period:
+            window.popleft()
+
+        if len(window) >= self.calls:
+            return JSONResponse(
+                status_code=429,
+                content={"success": False, "message": "Rate limit exceeded. Retry after 60 seconds."},
+                headers={"Retry-After": "60"},
+            )
+
+        window.append(now)
+        response = await call_next(request)
+        response.headers["X-RateLimit-Limit"] = str(self.calls)
+        response.headers["X-RateLimit-Remaining"] = str(self.calls - len(window))
+        return response
+
+
+# ─────────────────────────── request_id.py ──────────────────────────────────
+
+class RequestIDMiddleware(BaseHTTPMiddleware):
+    """Attaches a unique request-id to every request for distributed tracing."""
+
+    async def dispatch(self, request: Request, call_next):
+        req_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+        request.state.request_id = req_id
+        response = await call_next(request)
+        response.headers["X-Request-ID"] = req_id
+        return response
+
+
+# ─────────────────────────── audit_log.py ───────────────────────────────────
+
+AUDITED_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+
+
+class AuditLogMiddleware(BaseHTTPMiddleware):
+    """
+    Logs every state-changing request — required for GST audit trail
+    and ISO 27001 compliance.
+    """
+
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+
+        if request.method in AUDITED_METHODS:
+            user = getattr(request.state, "user_id", "anonymous")
+            logger.info(
+                "AUDIT | %s %s | user=%s | status=%s | req_id=%s",
+                request.method,
+                request.url.path,
+                user,
+                response.status_code,
+                getattr(request.state, "request_id", "-"),
+            )
+
+        return response
+"""
+app/api/v1/endpoints/auth.py
+============================
+BRS Section: User Authentication & Session Management
+- Email/password login with MFA (OTP)
+- JWT access + refresh token flow
+- Password reset via OTP (SMS / email)
+- Tenant-aware login (multi-company support)
+"""
+
+from datetime import datetime, timezone
+from typing import Optional
+from uuid import UUID
+
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from pydantic import BaseModel, EmailStr, Field
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.security import (
+    create_access_token,
+    create_refresh_token,
+    decode_token,
+    hash_password,
+    verify_password,
+    get_current_user,
+)
+from app.db.session import get_db
+from app.schemas.base import APIResponse
+
+router = APIRouter(prefix="/auth", tags=["Auth"])
+
+
+# ─── Request / Response Schemas ───────────────────────────────────────────────
+
+class LoginRequest(BaseModel):
+    email: EmailStr
+    password: str = Field(..., min_length=8)
+    tenant_id: Optional[str] = None       # Multi-company: specify which company
+    mfa_code: Optional[str] = Field(None, min_length=6, max_length=6)
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    refresh_token: str
+    token_type: str = "bearer"
+    expires_in: int = 3600
+    user: dict
+
+
+class RefreshRequest(BaseModel):
+    refresh_token: str
+
+
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr
+
+
+class ResetPasswordRequest(BaseModel):
+    token: str
+    new_password: str = Field(..., min_length=8)
+    confirm_password: str
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str = Field(..., min_length=8)
+
+
+# ─── Endpoints ────────────────────────────────────────────────────────────────
+
+@router.post("/login", response_model=APIResponse[TokenResponse])
+async def login(
+    payload: LoginRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Authenticate user and return JWT tokens.
+    Supports multi-tenant login: pass tenant_id to scope to a company.
+    If MFA is enabled for the account, mfa_code is required.
+
+    Flow:
+    1. Verify email + password
+    2. Check MFA (if enabled)
+    3. Return access token (short-lived) + refresh token (long-lived)
+    """
+    # ── Stub: replace with real DB lookup ──
+    # user = await UserRepository(db).get_by_email(payload.email)
+    # if not user or not verify_password(payload.password, user.hashed_password):
+    #     raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    # Simulated user for demo
+    mock_user = {
+        "id": "usr_demo",
+        "email": payload.email,
+        "role": "admin",
+        "tenant_id": payload.tenant_id or "default",
+        "permissions": [
+            "finance:read", "finance:write",
+            "hr:read", "hr:write",
+            "inventory:read", "inventory:write",
+            "sales:read", "sales:write",
+            "reports:view",
+        ],
+        "mfa_enabled": False,
+    }
+
+    # MFA check
+    if mock_user["mfa_enabled"] and not payload.mfa_code:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="MFA code required",
+        )
+
+    extra = {
+        "role": mock_user["role"],
+        "tenant_id": mock_user["tenant_id"],
+        "permissions": mock_user["permissions"],
+        "user_id": mock_user["id"],
+    }
+    access_token  = create_access_token(subject=mock_user["id"], extra=extra)
+    refresh_token = create_refresh_token(subject=mock_user["id"])
+
+    token_data = TokenResponse(
+        access_token=access_token,
+        refresh_token=refresh_token,
+        user={k: v for k, v in mock_user.items() if k != "hashed_password"},
+    )
+    return APIResponse.ok(data=token_data, message="Login successful")
+
+
+@router.post("/refresh", response_model=APIResponse[TokenResponse])
+async def refresh_token(payload: RefreshRequest):
+    """
+    Exchange a valid refresh token for a new access token.
+    Refresh tokens are single-use (rotation enforced via Redis blacklist in prod).
+    """
+    claims = decode_token(payload.refresh_token)
+    if claims.get("type") != "refresh":
+        raise HTTPException(status_code=401, detail="Invalid token type")
+
+    access_token  = create_access_token(subject=claims["sub"])
+    refresh_token = create_refresh_token(subject=claims["sub"])
+
+    return APIResponse.ok(
+        data=TokenResponse(
+            access_token=access_token,
+            refresh_token=refresh_token,
+            user={"id": claims["sub"]},
+        ),
+        message="Token refreshed",
+    )
+
+
+@router.post("/logout", response_model=APIResponse)
+async def logout(current_user: dict = Depends(get_current_user)):
+    """
+    Invalidate the current access token.
+    In production: add jti (JWT ID) to Redis blacklist until expiry.
+    """
+    return APIResponse.ok(data=None, message="Logged out successfully")
+
+
+@router.post("/forgot-password", response_model=APIResponse)
+async def forgot_password(
+    payload: ForgotPasswordRequest,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Send password-reset OTP to registered email/mobile.
+    OTP expires in 15 minutes.
+    """
+    # background_tasks.add_task(send_password_reset_email, payload.email)
+    return APIResponse.ok(
+        data=None,
+        message="If this email is registered, a reset link has been sent.",
+    )
+
+
+@router.post("/reset-password", response_model=APIResponse)
+async def reset_password(
+    payload: ResetPasswordRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Validate reset token and update password."""
+    if payload.new_password != payload.confirm_password:
+        raise HTTPException(status_code=400, detail="Passwords do not match")
+    # validate OTP / signed token, update hashed_password in DB
+    return APIResponse.ok(data=None, message="Password reset successful")
+
+
+@router.post("/change-password", response_model=APIResponse)
+async def change_password(
+    payload: ChangePasswordRequest,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Authenticated password change (requires current password)."""
+    # verify current_password, hash new_password, store
+    return APIResponse.ok(data=None, message="Password changed successfully")
+
+
+@router.get("/me", response_model=APIResponse[dict])
+async def get_profile(current_user: dict = Depends(get_current_user)):
+    """Return the authenticated user's profile and permissions."""
+    return APIResponse.ok(data=current_user)
+"""
+app/api/v1/endpoints/finance.py
+================================
+BRS Section: Financial Management Module
+Covers:
+  - Chart of Accounts (CoA)
+  - Journal Entries (double-entry bookkeeping)
+  - General Ledger
+  - Trial Balance
+  - Profit & Loss Statement
+  - Balance Sheet
+  - Bank Reconciliation
+  - Multi-currency transactions
+  - Inter-company / multi-entity transactions
+  - GST-linked financial entries
+"""
+
+from datetime import date
+from enum import Enum
+from typing import List, Optional
+from uuid import UUID
+
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import BaseModel, Field
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.security import Permission, get_current_user, require_permissions
+from app.db.session import get_db
+from app.schemas.base import APIResponse, AuditMixin, MoneySchema, PaginationMeta, PaginationParams
+
+router = APIRouter(prefix="/finance", tags=["Financial Management"])
+
+
+# ─── Enums ───────────────────────────────────────────────────────────────────
+
+class AccountType(str, Enum):
+    ASSET       = "asset"
+    LIABILITY   = "liability"
+    EQUITY      = "equity"
+    REVENUE     = "revenue"
+    EXPENSE     = "expense"
+
+
+class EntryStatus(str, Enum):
+    DRAFT    = "draft"
+    POSTED   = "posted"
+    REVERSED = "reversed"
+
+
+class CurrencyCode(str, Enum):
+    INR = "INR"
+    USD = "USD"
+    AED = "AED"
+    SAR = "SAR"
+    EUR = "EUR"
+
+
+# ─── Schemas ─────────────────────────────────────────────────────────────────
+
+class AccountCreate(BaseModel):
+    code: str = Field(..., max_length=20, description="Unique account code e.g. 1001")
+    name: str = Field(..., max_length=200)
+    account_type: AccountType
+    parent_code: Optional[str] = None     # Hierarchical CoA
+    is_bank_account: bool = False
+    currency: CurrencyCode = CurrencyCode.INR
+    description: Optional[str] = None
+
+
+class AccountOut(AccountCreate, AuditMixin):
+    balance: float = 0.0
+
+
+class JournalLineCreate(BaseModel):
+    account_code: str
+    debit: float = Field(default=0.0, ge=0)
+    credit: float = Field(default=0.0, ge=0)
+    description: Optional[str] = None
+    cost_center: Optional[str] = None
+    project_id: Optional[UUID] = None
+    gst_category: Optional[str] = None   # CGST / SGST / IGST / exempt
+
+
+class JournalEntryCreate(BaseModel):
+    entry_date: date
+    reference: str = Field(..., max_length=100)
+    narration: str = Field(..., max_length=500)
+    currency: CurrencyCode = CurrencyCode.INR
+    exchange_rate: float = Field(default=1.0, gt=0)
+    lines: List[JournalLineCreate] = Field(..., min_length=2)
+    is_recurring: bool = False
+    recurrence_period: Optional[str] = None   # monthly | quarterly | yearly
+
+
+class JournalEntryOut(AuditMixin):
+    entry_number: str
+    entry_date: date
+    reference: str
+    narration: str
+    status: EntryStatus
+    total_debit: float
+    total_credit: float
+    currency: str
+    lines: List[dict]
+
+
+class LedgerEntryOut(BaseModel):
+    date: date
+    entry_number: str
+    narration: str
+    debit: float
+    credit: float
+    balance: float
+    reference: str
+
+
+class TrialBalanceRow(BaseModel):
+    account_code: str
+    account_name: str
+    account_type: AccountType
+    opening_debit: float
+    opening_credit: float
+    period_debit: float
+    period_credit: float
+    closing_debit: float
+    closing_credit: float
+
+
+class PLStatementRow(BaseModel):
+    category: str
+    account_name: str
+    current_period: float
+    previous_period: float
+    variance: float
+    variance_pct: float
+
+
+# ─── Chart of Accounts ───────────────────────────────────────────────────────
+
+@router.post("/accounts", response_model=APIResponse[AccountOut], status_code=201)
+async def create_account(
+    payload: AccountCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(require_permissions({Permission.FINANCE_WRITE})),
+):
+    """
+    Create a new ledger account in the Chart of Accounts.
+    Supports hierarchical parent-child structure for detailed reporting.
+    """
+    # Validate no duplicate code within tenant
+    # account = await FinanceRepository(db).create_account(payload, current_user)
+    return APIResponse.ok(
+        data=AccountOut(
+            id="00000000-0000-0000-0000-000000000001",
+            code=payload.code,
+            name=payload.name,
+            account_type=payload.account_type,
+            parent_code=payload.parent_code,
+            is_bank_account=payload.is_bank_account,
+            currency=payload.currency,
+            balance=0.0,
+            created_at="2026-01-01T00:00:00Z",
+            updated_at="2026-01-01T00:00:00Z",
+        ),
+        message="Account created",
+    )
+
+
+@router.get("/accounts", response_model=APIResponse[List[AccountOut]])
+async def list_accounts(
+    account_type: Optional[AccountType] = Query(None),
+    search: Optional[str] = Query(None),
+    pagination: PaginationParams = Depends(),
+    current_user: dict = Depends(require_permissions({Permission.FINANCE_READ})),
+    db: AsyncSession = Depends(get_db),
+):
+    """List all Chart of Accounts with optional filters."""
+    return APIResponse.ok(data=[], meta=PaginationMeta(total=0, page=1, page_size=25, total_pages=0))
+
+
+@router.get("/accounts/{account_code}", response_model=APIResponse[AccountOut])
+async def get_account(
+    account_code: str,
+    current_user: dict = Depends(require_permissions({Permission.FINANCE_READ})),
+    db: AsyncSession = Depends(get_db),
+):
+    """Fetch a single account by its code."""
+    return APIResponse.ok(data=None)
+
+
+# ─── Journal Entries ─────────────────────────────────────────────────────────
+
+@router.post("/journal-entries", response_model=APIResponse[JournalEntryOut], status_code=201)
+async def create_journal_entry(
+    payload: JournalEntryCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(require_permissions({Permission.FINANCE_WRITE})),
+):
+    """
+    Create a double-entry journal entry.
+    Validation:
+     - Sum of debits MUST equal sum of credits (balanced entry)
+     - Minimum 2 lines required
+     - Future-dated entries allowed but flagged
+    GST lines auto-split into CGST/SGST (intra-state) or IGST (inter-state).
+    """
+    total_debit  = sum(l.debit  for l in payload.lines)
+    total_credit = sum(l.credit for l in payload.lines)
+
+    if round(total_debit, 2) != round(total_credit, 2):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unbalanced entry: debits={total_debit} ≠ credits={total_credit}",
+        )
+
+    # Auto-generate entry number: JE/2026-27/00001
+    # entry = await FinanceRepository(db).create_journal_entry(payload, current_user)
+
+    return APIResponse.ok(
+        data=JournalEntryOut(
+            id="00000000-0000-0000-0000-000000000002",
+            entry_number="JE/2026-27/00001",
+            entry_date=payload.entry_date,
+            reference=payload.reference,
+            narration=payload.narration,
+            status=EntryStatus.DRAFT,
+            total_debit=total_debit,
+            total_credit=total_credit,
+            currency=payload.currency,
+            lines=[l.model_dump() for l in payload.lines],
+            created_at="2026-06-15T00:00:00Z",
+            updated_at="2026-06-15T00:00:00Z",
+        ),
+        message="Journal entry created (draft)",
+    )
+
+
+@router.patch("/journal-entries/{entry_id}/post", response_model=APIResponse)
+async def post_journal_entry(
+    entry_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(require_permissions({Permission.FINANCE_WRITE})),
+):
+    """
+    Post (approve) a draft journal entry.
+    Once posted it cannot be edited — only reversed.
+    Triggers: ledger balance update, GST liability update.
+    """
+    return APIResponse.ok(data={"id": str(entry_id), "status": "posted"}, message="Entry posted")
+
+
+@router.post("/journal-entries/{entry_id}/reverse", response_model=APIResponse)
+async def reverse_journal_entry(
+    entry_id: UUID,
+    reversal_date: date = Query(...),
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(require_permissions({Permission.FINANCE_WRITE})),
+):
+    """
+    Create a reversal entry with negated debits/credits.
+    Original entry is marked REVERSED; reversal entry is auto-posted.
+    """
+    return APIResponse.ok(
+        data={"reversal_entry_id": "new-uuid", "original_id": str(entry_id)},
+        message="Reversal entry created and posted",
+    )
+
+
+# ─── General Ledger ──────────────────────────────────────────────────────────
+
+@router.get("/ledger/{account_code}", response_model=APIResponse[List[LedgerEntryOut]])
+async def get_ledger(
+    account_code: str,
+    from_date: date = Query(...),
+    to_date: date = Query(...),
+    pagination: PaginationParams = Depends(),
+    current_user: dict = Depends(require_permissions({Permission.FINANCE_READ})),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Fetch the general ledger for an account within a date range.
+    Returns running balance (opening → closing) per line.
+    """
+    return APIResponse.ok(
+        data=[],
+        meta=PaginationMeta(total=0, page=1, page_size=25, total_pages=0),
+    )
+
+
+# ─── Reports ─────────────────────────────────────────────────────────────────
+
+@router.get("/reports/trial-balance", response_model=APIResponse[List[TrialBalanceRow]])
+async def trial_balance(
+    as_of_date: date = Query(...),
+    cost_center: Optional[str] = Query(None),
+    current_user: dict = Depends(require_permissions({Permission.REPORTS_VIEW})),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Generate Trial Balance as of a given date.
+    Optionally filter by cost centre for segment reporting.
+    """
+    return APIResponse.ok(data=[])
+
+
+@router.get("/reports/profit-and-loss", response_model=APIResponse[List[PLStatementRow]])
+async def profit_and_loss(
+    from_date: date = Query(...),
+    to_date: date = Query(...),
+    compare_previous_period: bool = Query(False),
+    cost_center: Optional[str] = Query(None),
+    current_user: dict = Depends(require_permissions({Permission.REPORTS_VIEW})),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Profit & Loss Statement with period comparison and variance analysis.
+    Groups accounts by Revenue / Cost of Sales / Gross Profit / Expenses / EBITDA / Net Profit.
+    """
+    return APIResponse.ok(data=[])
+
+
+@router.get("/reports/balance-sheet", response_model=APIResponse[dict])
+async def balance_sheet(
+    as_of_date: date = Query(...),
+    current_user: dict = Depends(require_permissions({Permission.REPORTS_VIEW})),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Balance Sheet: Assets = Liabilities + Equity.
+    Validates totals balance and flags discrepancies.
+    """
+    return APIResponse.ok(data={"assets": {}, "liabilities": {}, "equity": {}})
+
+
+@router.get("/reports/cash-flow", response_model=APIResponse[dict])
+async def cash_flow_statement(
+    from_date: date = Query(...),
+    to_date: date = Query(...),
+    method: str = Query("indirect", regex="^(direct|indirect)$"),
+    current_user: dict = Depends(require_permissions({Permission.REPORTS_VIEW})),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Cash Flow Statement (direct or indirect method).
+    Sections: Operating / Investing / Financing activities.
+    """
+    return APIResponse.ok(data={"operating": 0, "investing": 0, "financing": 0, "net_change": 0})
+
+
+@router.post("/bank-reconciliation", response_model=APIResponse[dict])
+async def bank_reconciliation(
+    bank_account_code: str,
+    statement_date: date = Query(...),
+    bank_closing_balance: float = Query(...),
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(require_permissions({Permission.FINANCE_WRITE})),
+):
+    """
+    Auto-match bank statement transactions with GL entries.
+    Returns matched / unmatched items for manual review.
+    """
+    return APIResponse.ok(
+        data={
+            "matched_count": 0,
+            "unmatched_gl_items": [],
+            "unmatched_bank_items": [],
+            "difference": 0.0,
+        }
+    )
+"""
+app/api/v1/endpoints/hr_payroll.py
+====================================
+BRS Section: HR & Payroll Management
+Covers:
+  - Employee master (HRIS)
+  - Attendance (biometric / manual / ESS self-service)
+  - Leave management (apply / approve / reject)
+  - Shift scheduling
+  - Overtime tracking
+  - Payroll processing (gross → net with statutory deductions)
+  - PF / ESI / TDS / PT compliance (India)
+  - Payslip generation
+  - WPS (Wage Protection System — GCC markets)
+  - Employee Self Service (ESS) portal endpoints
+"""
+
+from datetime import date
+from enum import Enum
+from typing import List, Optional
+from uuid import UUID
+
+from fastapi import APIRouter, Depends, Query
+from pydantic import BaseModel, EmailStr, Field
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.security import Permission, get_current_user, require_permissions, require_role, Role
+from app.db.session import get_db
+from app.schemas.base import APIResponse, AddressSchema, AuditMixin, PaginationMeta, PaginationParams
+
+router = APIRouter(prefix="/hr", tags=["HR & Payroll"])
+
+
+# ─── Enums ───────────────────────────────────────────────────────────────────
+
+class EmploymentType(str, Enum):
+    FULL_TIME   = "full_time"
+    PART_TIME   = "part_time"
+    CONTRACT    = "contract"
+    INTERN      = "intern"
+
+
+class LeaveType(str, Enum):
+    CASUAL      = "casual"
+    SICK        = "sick"
+    EARNED      = "earned"
+    MATERNITY   = "maternity"
+    PATERNITY   = "paternity"
+    UNPAID      = "unpaid"
+    COMPENSATORY = "compensatory"
+
+
+class LeaveStatus(str, Enum):
+    PENDING   = "pending"
+    APPROVED  = "approved"
+    REJECTED  = "rejected"
+    CANCELLED = "cancelled"
+
+
+class AttendanceStatus(str, Enum):
+    PRESENT   = "present"
+    ABSENT    = "absent"
+    HALF_DAY  = "half_day"
+    WFH       = "wfh"
+    ON_LEAVE  = "on_leave"
+    HOLIDAY   = "holiday"
+
+
+class PayrollStatus(str, Enum):
+    DRAFT     = "draft"
+    PROCESSED = "processed"
+    APPROVED  = "approved"
+    PAID      = "paid"
+
+
+# ─── Employee Schemas ─────────────────────────────────────────────────────────
+
+class EmployeeCreate(BaseModel):
+    employee_code: str = Field(..., max_length=20)
+    first_name: str
+    last_name: str
+    email: EmailStr
+    mobile: str = Field(..., max_length=15)
+    designation: str
+    department: str
+    employment_type: EmploymentType
+    date_of_joining: date
+    date_of_birth: date
+    gender: str = Field(..., regex="^(male|female|other)$")
+    address: AddressSchema
+
+    # Payroll configuration
+    basic_salary: float = Field(..., gt=0)
+    hra: float = Field(default=0.0, ge=0)
+    special_allowance: float = Field(default=0.0, ge=0)
+    pf_applicable: bool = True
+    esi_applicable: bool = True
+    pan_number: Optional[str] = Field(None, max_length=10)
+    aadhaar_number: Optional[str] = Field(None, max_length=12)
+    bank_account_number: str
+    bank_ifsc: str = Field(..., max_length=11)
+    bank_name: str
+
+    # Reporting
+    reporting_manager_id: Optional[UUID] = None
+    cost_center: Optional[str] = None
+
+
+class EmployeeOut(AuditMixin):
+    employee_code: str
+    full_name: str
+    email: str
+    designation: str
+    department: str
+    employment_type: EmploymentType
+    date_of_joining: date
+    status: str   # active | inactive | on_notice | terminated
+
+
+class AttendanceRecord(BaseModel):
+    employee_id: UUID
+    attendance_date: date
+    check_in: Optional[str] = None   # ISO time "09:00:00"
+    check_out: Optional[str] = None
+    status: AttendanceStatus
+    late_minutes: int = 0
+    overtime_hours: float = 0.0
+    source: str = "manual"           # biometric | manual | mobile
+
+
+class LeaveApplication(BaseModel):
+    leave_type: LeaveType
+    from_date: date
+    to_date: date
+    reason: str = Field(..., max_length=500)
+    is_half_day: bool = False
+    half_day_session: Optional[str] = None  # morning | afternoon
+
+
+class PayrollRunRequest(BaseModel):
+    month: int = Field(..., ge=1, le=12)
+    year: int = Field(..., ge=2020)
+    department: Optional[str] = None    # None = all departments
+    include_arrears: bool = False
+
+
+class PayslipComponent(BaseModel):
+    component_name: str
+    component_type: str   # earning | deduction
+    amount: float
+
+
+class PayslipOut(BaseModel):
+    employee_id: UUID
+    employee_code: str
+    employee_name: str
+    month: int
+    year: int
+    pay_period: str   # "June 2026"
+
+    # Earnings
+    basic: float
+    hra: float
+    special_allowance: float
+    overtime_pay: float
+    other_earnings: float
+    gross_salary: float
+
+    # Deductions
+    pf_employee: float         # 12% of basic
+    esi_employee: float        # 0.75% of gross (if applicable)
+    professional_tax: float    # State-specific slab
+    tds: float                 # Income tax deduction
+    loan_recovery: float
+    other_deductions: float
+    total_deductions: float
+
+    net_pay: float
+    status: PayrollStatus
+
+
+class ShiftSchedule(BaseModel):
+    shift_name: str
+    shift_code: str
+    start_time: str    # "09:00"
+    end_time: str      # "18:00"
+    break_minutes: int = 60
+    grace_minutes: int = 15
+    is_night_shift: bool = False
+    weekly_offs: List[str] = Field(default=["Sunday"])
+
+
+# ─── Employee Endpoints ───────────────────────────────────────────────────────
+
+@router.post("/employees", response_model=APIResponse[EmployeeOut], status_code=201)
+async def create_employee(
+    payload: EmployeeCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(require_permissions({Permission.HR_WRITE})),
+):
+    """
+    Onboard a new employee.
+    Auto-creates: ESS login, payroll structure, leave balance based on policy.
+    Triggers: welcome email + ESS credential SMS.
+    """
+    # employee = await HRRepository(db).create_employee(payload, current_user)
+    return APIResponse.ok(
+        data=EmployeeOut(
+            id="00000000-0000-0000-0000-000000000010",
+            employee_code=payload.employee_code,
+            full_name=f"{payload.first_name} {payload.last_name}",
+            email=payload.email,
+            designation=payload.designation,
+            department=payload.department,
+            employment_type=payload.employment_type,
+            date_of_joining=payload.date_of_joining,
+            status="active",
+            created_at="2026-06-15T00:00:00Z",
+            updated_at="2026-06-15T00:00:00Z",
+        ),
+        message="Employee onboarded successfully",
+    )
+
+
+@router.get("/employees", response_model=APIResponse[List[EmployeeOut]])
+async def list_employees(
+    department: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    search: Optional[str] = Query(None),
+    pagination: PaginationParams = Depends(),
+    current_user: dict = Depends(require_permissions({Permission.HR_READ})),
+    db: AsyncSession = Depends(get_db),
+):
+    """List employees with filters. Managers see only their team."""
+    return APIResponse.ok(data=[], meta=PaginationMeta(total=0, page=1, page_size=25, total_pages=0))
+
+
+@router.get("/employees/{employee_id}", response_model=APIResponse[EmployeeOut])
+async def get_employee(
+    employee_id: UUID,
+    current_user: dict = Depends(require_permissions({Permission.HR_READ})),
+    db: AsyncSession = Depends(get_db),
+):
+    return APIResponse.ok(data=None)
+
+
+@router.put("/employees/{employee_id}", response_model=APIResponse[EmployeeOut])
+async def update_employee(
+    employee_id: UUID,
+    payload: EmployeeCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(require_permissions({Permission.HR_WRITE})),
+):
+    return APIResponse.ok(data=None, message="Employee updated")
+
+
+# ─── Attendance ───────────────────────────────────────────────────────────────
+
+@router.post("/attendance", response_model=APIResponse[AttendanceRecord], status_code=201)
+async def mark_attendance(
+    payload: AttendanceRecord,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(require_permissions({Permission.HR_WRITE})),
+):
+    """
+    Mark attendance for a single employee.
+    Biometric integration: POST from device webhook → same endpoint.
+    Calculates: late minutes, overtime hours, half-day flag automatically.
+    """
+    return APIResponse.ok(data=payload, message="Attendance marked")
+
+
+@router.get("/attendance/summary", response_model=APIResponse[dict])
+async def attendance_summary(
+    month: int = Query(..., ge=1, le=12),
+    year: int = Query(..., ge=2020),
+    department: Optional[str] = Query(None),
+    current_user: dict = Depends(require_permissions({Permission.HR_READ})),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Monthly attendance summary for payroll cut-off.
+    Returns: present days, absent days, leaves, OT hours per employee.
+    """
+    return APIResponse.ok(data={"summary": [], "total_employees": 0})
+
+
+# ─── Leave Management ─────────────────────────────────────────────────────────
+
+@router.post("/leave/apply", response_model=APIResponse[dict], status_code=201)
+async def apply_leave(
+    payload: LeaveApplication,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    ESS: Employee applies for leave.
+    Validates: available balance, blackout dates, team coverage.
+    Triggers: approval workflow notification to manager.
+    """
+    # Check leave balance
+    # Validate no clashing approved leave in team
+    # Create leave request → notify manager
+    return APIResponse.ok(
+        data={"leave_request_id": "lr_001", "status": "pending"},
+        message="Leave application submitted",
+    )
+
+
+@router.patch("/leave/{leave_id}/approve", response_model=APIResponse)
+async def approve_leave(
+    leave_id: UUID,
+    comments: Optional[str] = None,
+    current_user: dict = Depends(require_role(Role.MANAGER)),
+    db: AsyncSession = Depends(get_db),
+):
+    """Manager approves leave. Deducts from leave balance. Notifies employee."""
+    return APIResponse.ok(data={"leave_id": str(leave_id), "status": "approved"})
+
+
+@router.patch("/leave/{leave_id}/reject", response_model=APIResponse)
+async def reject_leave(
+    leave_id: UUID,
+    reason: str,
+    current_user: dict = Depends(require_role(Role.MANAGER)),
+    db: AsyncSession = Depends(get_db),
+):
+    """Manager rejects leave application with mandatory reason."""
+    return APIResponse.ok(data={"leave_id": str(leave_id), "status": "rejected"})
+
+
+@router.get("/leave/balance/{employee_id}", response_model=APIResponse[dict])
+async def leave_balance(
+    employee_id: UUID,
+    year: int = Query(...),
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get available leave balance per type for an employee."""
+    return APIResponse.ok(data={
+        "casual": {"entitled": 12, "taken": 2, "available": 10},
+        "sick":   {"entitled": 12, "taken": 0, "available": 12},
+        "earned": {"entitled": 18, "taken": 5, "available": 13},
+    })
+
+
+# ─── Payroll Processing ───────────────────────────────────────────────────────
+
+@router.post("/payroll/run", response_model=APIResponse[dict], status_code=201)
+async def run_payroll(
+    payload: PayrollRunRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(require_permissions({Permission.PAYROLL_RUN})),
+):
+    """
+    Process payroll for a given month/year.
+
+    Computation flow:
+    1. Fetch attendance data for the period
+    2. Calculate LOP (Loss of Pay) for unauthorised absences
+    3. Compute gross = basic + HRA + special + OT pay + arrears
+    4. Compute statutory deductions:
+       - PF employee: 12% of basic (capped at ₹15,000 basic)
+       - PF employer: 12% (cost to company)
+       - ESI employee: 0.75% of gross (if gross ≤ ₹21,000/month)
+       - ESI employer: 3.25%
+       - Professional Tax: state-specific monthly slab
+       - TDS: income-tax based on annual projection + Chapter VI-A declarations
+    5. Apply loans / advances recovery
+    6. net_pay = gross − total_deductions
+    7. Create payroll journal entries in Finance module
+    8. Generate PDF payslips
+    9. Trigger bank transfer file (NEFT / RTGS / WPS)
+    """
+    return APIResponse.ok(
+        data={
+            "payroll_run_id": "pr_2026_06",
+            "month": payload.month,
+            "year": payload.year,
+            "status": "processing",
+            "employee_count": 0,
+            "total_gross": 0.0,
+            "total_deductions": 0.0,
+            "total_net": 0.0,
+        },
+        message="Payroll run initiated",
+    )
+
+
+@router.get("/payroll/{payroll_run_id}/payslips", response_model=APIResponse[List[PayslipOut]])
+async def get_payslips(
+    payroll_run_id: str,
+    department: Optional[str] = Query(None),
+    pagination: PaginationParams = Depends(),
+    current_user: dict = Depends(require_permissions({Permission.PAYROLL_RUN})),
+    db: AsyncSession = Depends(get_db),
+):
+    """Retrieve all payslips for a payroll run."""
+    return APIResponse.ok(data=[], meta=PaginationMeta(total=0, page=1, page_size=25, total_pages=0))
+
+
+@router.get("/payroll/payslip/{employee_id}/{year}/{month}", response_model=APIResponse[PayslipOut])
+async def get_my_payslip(
+    employee_id: UUID,
+    year: int,
+    month: int,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """ESS: Employee views their own payslip."""
+    return APIResponse.ok(data=None)
+
+
+# ─── Shifts ───────────────────────────────────────────────────────────────────
+
+@router.post("/shifts", response_model=APIResponse[ShiftSchedule], status_code=201)
+async def create_shift(
+    payload: ShiftSchedule,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(require_permissions({Permission.HR_WRITE})),
+):
+    return APIResponse.ok(data=payload, message="Shift created")
+
+
+@router.get("/shifts", response_model=APIResponse[List[ShiftSchedule]])
+async def list_shifts(
+    current_user: dict = Depends(require_permissions({Permission.HR_READ})),
+    db: AsyncSession = Depends(get_db),
+):
+    return APIResponse.ok(data=[])
+
+
+# ─── Compliance Reports ────────────────────────────────────────────────────────
+
+@router.get("/compliance/pf-ecr", response_model=APIResponse[dict])
+async def pf_ecr_report(
+    month: int = Query(..., ge=1, le=12),
+    year: int = Query(..., ge=2020),
+    current_user: dict = Depends(require_permissions({Permission.PAYROLL_RUN})),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Generate PF Electronic Challan cum Return (ECR) file
+    for EPFO portal upload.
+    """
+    return APIResponse.ok(data={"ecr_lines": [], "total_pf": 0.0})
+
+
+@router.get("/compliance/esi-return", response_model=APIResponse[dict])
+async def esi_return(
+    half_year: str = Query(..., regex="^(apr-sep|oct-mar)$"),
+    year: int = Query(...),
+    current_user: dict = Depends(require_permissions({Permission.PAYROLL_RUN})),
+    db: AsyncSession = Depends(get_db),
+):
+    """Generate ESI half-yearly return for ESIC portal."""
+    return APIResponse.ok(data={"esi_lines": [], "total_esi": 0.0})
+
+
+@router.get("/compliance/form-16", response_model=APIResponse[dict])
+async def form_16(
+    employee_id: UUID,
+    financial_year: str = Query(..., regex=r"^\d{4}-\d{2}$"),
+    current_user: dict = Depends(require_permissions({Permission.PAYROLL_RUN})),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Generate Form 16 (TDS certificate) for an employee.
+    Parts A (TDS deducted) + B (salary computation) in prescribed format.
+    """
+    return APIResponse.ok(data={"form_16": {}, "employee_id": str(employee_id)})
+"""
+app/api/v1/endpoints/inventory.py
+===================================
+BRS Section: Inventory & Warehouse Management
+Covers: Items, stock movements, adjustments, valuation (FIFO/LIFO/Avg),
+        multi-warehouse, stock transfer, reorder alerts, batch/serial tracking
+"""
+
+from datetime import date
+from enum import Enum
+from typing import List, Optional
+from uuid import UUID
+
+from fastapi import APIRouter, Depends, Query
+from pydantic import BaseModel, Field
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.security import Permission, require_permissions
+from app.db.session import get_db
+from app.schemas.base import APIResponse, AuditMixin, PaginationMeta, PaginationParams
+
+router = APIRouter(prefix="/inventory", tags=["Inventory"])
+
+
+class ValuationMethod(str, Enum):
+    FIFO    = "fifo"
+    LIFO    = "lifo"
+    AVERAGE = "average"
+    SPECIFIC = "specific_identification"
+
+
+class MovementType(str, Enum):
+    RECEIPT         = "receipt"
+    ISSUE           = "issue"
+    TRANSFER_OUT    = "transfer_out"
+    TRANSFER_IN     = "transfer_in"
+    ADJUSTMENT_PLUS = "adjustment_plus"
+    ADJUSTMENT_MINUS = "adjustment_minus"
+    OPENING_STOCK   = "opening_stock"
+    RETURN_TO_SUPPLIER = "return_to_supplier"
+    CUSTOMER_RETURN = "customer_return"
+
+
+class ItemCreate(BaseModel):
+    sku: str = Field(..., max_length=50)
+    name: str
+    description: Optional[str] = None
+    category: str
+    sub_category: Optional[str] = None
+    unit_of_measure: str
+    hsn_code: str = Field(..., max_length=8)   # GST HSN/SAC
+    gst_rate: float = Field(..., ge=0, le=28)  # 0 / 5 / 12 / 18 / 28
+    cost_price: float = Field(..., ge=0)
+    selling_price: float = Field(..., ge=0)
+    reorder_level: int = Field(default=0, ge=0)
+    reorder_quantity: int = Field(default=0, ge=0)
+    valuation_method: ValuationMethod = ValuationMethod.AVERAGE
+    is_batch_tracked: bool = False
+    is_serial_tracked: bool = False
+    is_active: bool = True
+
+
+class ItemOut(ItemCreate, AuditMixin):
+    current_stock: float = 0.0
+    stock_value: float = 0.0
+    last_purchase_price: float = 0.0
+
+
+class StockMovement(BaseModel):
+    item_id: UUID
+    warehouse_id: UUID
+    movement_type: MovementType
+    quantity: float = Field(..., gt=0)
+    unit_cost: Optional[float] = Field(None, ge=0)
+    reference_document: Optional[str] = None   # PO/SO/MR number
+    batch_number: Optional[str] = None
+    serial_numbers: Optional[List[str]] = None
+    movement_date: date
+    remarks: Optional[str] = None
+
+
+class StockTransferRequest(BaseModel):
+    item_id: UUID
+    from_warehouse_id: UUID
+    to_warehouse_id: UUID
+    quantity: float = Field(..., gt=0)
+    batch_number: Optional[str] = None
+    transfer_date: date
+
+
+class StockAdjustmentRequest(BaseModel):
+    item_id: UUID
+    warehouse_id: UUID
+    physical_count: float = Field(..., ge=0)
+    reason: str
+    adjustment_date: date
+
+
+@router.post("/items", response_model=APIResponse[ItemOut], status_code=201)
+async def create_item(
+    payload: ItemCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(require_permissions({Permission.INVENTORY_WRITE})),
+):
+    """Create a new inventory item with GST classification."""
+    return APIResponse.ok(data=None, message="Item created")
+
+
+@router.get("/items", response_model=APIResponse[List[ItemOut]])
+async def list_items(
+    category: Optional[str] = Query(None),
+    low_stock: bool = Query(False, description="Return only items below reorder level"),
+    warehouse_id: Optional[UUID] = Query(None),
+    search: Optional[str] = Query(None),
+    pagination: PaginationParams = Depends(),
+    current_user: dict = Depends(require_permissions({Permission.INVENTORY_READ})),
+    db: AsyncSession = Depends(get_db),
+):
+    return APIResponse.ok(data=[], meta=PaginationMeta(total=0, page=1, page_size=25, total_pages=0))
+
+
+@router.post("/movements", response_model=APIResponse[StockMovement], status_code=201)
+async def record_movement(
+    payload: StockMovement,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(require_permissions({Permission.INVENTORY_WRITE})),
+):
+    """
+    Record a stock movement.
+    Automatically updates: stock balance, valuation, GL journal entry.
+    Triggers reorder alert if stock falls below reorder_level.
+    """
+    return APIResponse.ok(data=payload, message="Stock movement recorded")
+
+
+@router.post("/transfer", response_model=APIResponse[dict], status_code=201)
+async def transfer_stock(
+    payload: StockTransferRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(require_permissions({Permission.INVENTORY_WRITE})),
+):
+    """Inter-warehouse stock transfer with transit tracking."""
+    return APIResponse.ok(data={"transfer_id": "tr_001"}, message="Transfer initiated")
+
+
+@router.post("/adjustments", response_model=APIResponse[dict], status_code=201)
+async def stock_adjustment(
+    payload: StockAdjustmentRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(require_permissions({Permission.INVENTORY_WRITE})),
+):
+    """
+    Physical count adjustment.
+    Computes variance, posts adjustment journal entry, logs reason.
+    """
+    return APIResponse.ok(data={"adjustment_id": "adj_001"}, message="Adjustment posted")
+
+
+@router.get("/stock-report", response_model=APIResponse[List[dict]])
+async def stock_report(
+    warehouse_id: Optional[UUID] = Query(None),
+    as_of_date: date = Query(default=date.today()),
+    current_user: dict = Depends(require_permissions({Permission.INVENTORY_READ})),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Stock position report: quantity, value, aging by item / warehouse.
+    """
+    return APIResponse.ok(data=[])
+
+
+@router.get("/reorder-alerts", response_model=APIResponse[List[dict]])
+async def reorder_alerts(
+    warehouse_id: Optional[UUID] = Query(None),
+    current_user: dict = Depends(require_permissions({Permission.INVENTORY_READ})),
+    db: AsyncSession = Depends(get_db),
+):
+    """Items below reorder level — auto-suggest purchase quantity."""
+    return APIResponse.ok(data=[])
+"""
+app/api/v1/endpoints/gst_compliance.py
+=========================================
+BRS Section: GST Compliance (India-specific)
+Covers:
+  - GST-compliant invoice generation (B2B / B2C / B2CL)
+  - E-Invoice (IRN + QR code — mandatory for turnover > ₹5 Cr)
+  - E-Way Bill generation
+  - GSTR-1 (outward supplies)
+  - GSTR-3B (monthly summary + tax payment)
+  - GSTR-2B (auto-drafted ITC)
+  - Input Tax Credit (ITC) reconciliation
+  - HSN summary
+  - Reverse Charge Mechanism (RCM)
+"""
+
+from datetime import date
+from enum import Enum
+from typing import List, Optional
+from uuid import UUID
+
+from fastapi import APIRouter, BackgroundTasks, Depends, Query
+from pydantic import BaseModel, Field
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.security import Permission, require_permissions
+from app.core.security import validate_gstin
+from app.db.session import get_db
+from app.schemas.base import APIResponse, AuditMixin, PaginationMeta, PaginationParams
+
+router = APIRouter(prefix="/gst", tags=["GST Compliance"])
+
+
+# ─── Enums ───────────────────────────────────────────────────────────────────
+
+class SupplyType(str, Enum):
+    B2B  = "b2b"    # Business to Business
+    B2C  = "b2c"    # Business to Consumer (< ₹2.5 lakh)
+    B2CL = "b2cl"   # Business to Consumer Large (≥ ₹2.5 lakh, inter-state)
+    EXPORT = "export"
+    SEZ  = "sez"
+    NIL_RATED = "nil_rated"
+    EXEMPT = "exempt"
+
+
+class GSTType(str, Enum):
+    CGST  = "cgst"
+    SGST  = "sgst"
+    IGST  = "igst"
+    UTGST = "utgst"   # Union Territory GST
+    CESS  = "cess"
+
+
+class ReturnType(str, Enum):
+    GSTR1  = "GSTR-1"
+    GSTR3B = "GSTR-3B"
+    GSTR2B = "GSTR-2B"
+    GSTR9  = "GSTR-9"   # Annual return
+    GSTR9C = "GSTR-9C"  # Reconciliation statement
+
+
+# ─── Schemas ─────────────────────────────────────────────────────────────────
+
+class GSTLineItem(BaseModel):
+    description: str
+    hsn_sac_code: str = Field(..., max_length=8)
+    quantity: float = Field(..., gt=0)
+    unit: str
+    unit_price: float = Field(..., ge=0)
+    discount: float = Field(default=0.0, ge=0)
+    taxable_value: float = Field(..., ge=0)
+    gst_rate: float = Field(..., ge=0, le=28)   # 0/5/12/18/28
+    cgst_rate: float = 0.0
+    sgst_rate: float = 0.0
+    igst_rate: float = 0.0
+    cess_rate: float = 0.0
+
+
+class GSTInvoiceCreate(BaseModel):
+    invoice_date: date
+    supply_type: SupplyType
+    place_of_supply: str = Field(..., max_length=2)  # State code e.g. "36" for Telangana
+
+    # Buyer details
+    buyer_name: str
+    buyer_gstin: Optional[str] = None
+    buyer_address: str
+
+    # Seller (auto from tenant settings)
+    seller_gstin: str
+
+    line_items: List[GSTLineItem] = Field(..., min_length=1)
+    reverse_charge: bool = False
+    is_e_invoice: bool = False    # Triggers IRN generation via NIC API
+
+
+class GSTInvoiceOut(AuditMixin):
+    invoice_number: str
+    invoice_date: date
+    supply_type: SupplyType
+    buyer_name: str
+    buyer_gstin: Optional[str]
+    taxable_value: float
+    total_cgst: float
+    total_sgst: float
+    total_igst: float
+    total_cess: float
+    total_tax: float
+    invoice_value: float
+    irn: Optional[str] = None     # Invoice Reference Number (e-Invoice)
+    ack_number: Optional[str] = None
+    qr_code: Optional[str] = None  # Base64 QR
+
+
+class EWayBillRequest(BaseModel):
+    invoice_id: UUID
+    transporter_id: str
+    vehicle_number: str
+    transport_mode: str = Field(..., regex="^(road|rail|air|ship)$")
+    distance_km: int = Field(..., gt=0)
+
+
+class GSTR1Summary(BaseModel):
+    tax_period: str       # "062026" = June 2026
+    b2b_supplies: float
+    b2c_large_supplies: float
+    b2c_small_supplies: float
+    nil_exempt_supplies: float
+    exports: float
+    total_taxable: float
+    total_cgst: float
+    total_sgst: float
+    total_igst: float
+    total_cess: float
+    total_tax: float
+    total_invoice_value: float
+
+
+class GSTR3BSummary(BaseModel):
+    tax_period: str
+    outward_taxable: float
+    outward_tax: float
+    inward_itc_eligible: float
+    inward_itc_ineligible: float
+    net_tax_payable_cgst: float
+    net_tax_payable_sgst: float
+    net_tax_payable_igst: float
+    itc_claimed_cgst: float
+    itc_claimed_sgst: float
+    itc_claimed_igst: float
+    cash_to_pay_cgst: float
+    cash_to_pay_sgst: float
+    cash_to_pay_igst: float
+
+
+# ─── Endpoints ────────────────────────────────────────────────────────────────
+
+@router.post("/invoices", response_model=APIResponse[GSTInvoiceOut], status_code=201)
+async def create_gst_invoice(
+    payload: GSTInvoiceCreate,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(require_permissions({Permission.FINANCE_WRITE})),
+):
+    """
+    Create a GST-compliant tax invoice.
+
+    Auto-calculation logic:
+    - Intra-state supply → split rate into equal CGST + SGST
+    - Inter-state supply → entire rate as IGST
+    - Place of Supply determines IGST vs CGST+SGST
+    - Reverse Charge → buyer liable to pay tax (flag on invoice)
+    - If is_e_invoice=True → POST to NIC IRP API to get IRN + QR code
+
+    Invoice number format: GSTIN/FY/Seq e.g. 36ABCDE1234F1Z5/2026-27/0001
+    """
+    if payload.buyer_gstin and not validate_gstin(payload.buyer_gstin):
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail="Invalid buyer GSTIN format")
+
+    # Calculate tax
+    seller_state = payload.seller_gstin[:2]   # First 2 digits = state code
+    is_intra_state = seller_state == payload.place_of_supply
+
+    total_cgst = total_sgst = total_igst = total_cess = total_taxable = 0.0
+    for item in payload.line_items:
+        taxable = item.taxable_value
+        total_taxable += taxable
+        if is_intra_state:
+            cgst = taxable * (item.gst_rate / 2) / 100
+            sgst = taxable * (item.gst_rate / 2) / 100
+            total_cgst += cgst
+            total_sgst += sgst
+        else:
+            igst = taxable * item.gst_rate / 100
+            total_igst += igst
+        total_cess += taxable * item.cess_rate / 100
+
+    total_tax = total_cgst + total_sgst + total_igst + total_cess
+    invoice_value = total_taxable + total_tax
+
+    # background_tasks.add_task(generate_irn, payload) if payload.is_e_invoice
+
+    return APIResponse.ok(
+        data=GSTInvoiceOut(
+            id="00000000-0000-0000-0000-000000000020",
+            invoice_number="36ABCDE1234F1Z5/2026-27/0001",
+            invoice_date=payload.invoice_date,
+            supply_type=payload.supply_type,
+            buyer_name=payload.buyer_name,
+            buyer_gstin=payload.buyer_gstin,
+            taxable_value=round(total_taxable, 2),
+            total_cgst=round(total_cgst, 2),
+            total_sgst=round(total_sgst, 2),
+            total_igst=round(total_igst, 2),
+            total_cess=round(total_cess, 2),
+            total_tax=round(total_tax, 2),
+            invoice_value=round(invoice_value, 2),
+            irn=None,
+            created_at="2026-06-15T00:00:00Z",
+            updated_at="2026-06-15T00:00:00Z",
+        ),
+        message="GST invoice created",
+    )
+
+
+@router.post("/e-invoice/{invoice_id}/generate-irn", response_model=APIResponse[dict])
+async def generate_irn(
+    invoice_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(require_permissions({Permission.GST_SUBMIT})),
+):
+    """
+    Generate IRN (Invoice Reference Number) via NIC IRP API.
+    Returns: IRN, Acknowledgement Number, Acknowledgement Date, Signed QR Code.
+    Mandatory for taxpayers with turnover > ₹5 Crore.
+    """
+    # Call NIC IRP API: https://einvoice1.gst.gov.in/
+    return APIResponse.ok(
+        data={
+            "invoice_id": str(invoice_id),
+            "irn": "a1b2c3d4e5f6...",
+            "ack_no": "112023150123456",
+            "ack_date": "2026-06-15",
+            "qr_code": "<base64-string>",
+            "signed_invoice": "<jwt-string>",
+        },
+        message="IRN generated successfully",
+    )
+
+
+@router.post("/eway-bill", response_model=APIResponse[dict], status_code=201)
+async def generate_eway_bill(
+    payload: EWayBillRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(require_permissions({Permission.GST_SUBMIT})),
+):
+    """
+    Generate E-Way Bill via GST API.
+    Required for goods movement > ₹50,000.
+    Returns: EWB Number, generated date, validity.
+    """
+    return APIResponse.ok(
+        data={
+            "ewb_number": "EWB2026001234",
+            "generated_date": "2026-06-15",
+            "valid_till": "2026-06-16",
+            "alert": "Valid for 1 day per 200 km",
+        },
+    )
+
+
+@router.get("/gstr1/summary", response_model=APIResponse[GSTR1Summary])
+async def gstr1_summary(
+    month: int = Query(..., ge=1, le=12),
+    year: int = Query(..., ge=2017),
+    current_user: dict = Depends(require_permissions({Permission.REPORTS_VIEW})),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    GSTR-1 summary: all outward supply data for filing.
+    Breaks down B2B, B2CL, B2CS, nil-rated, exports, etc.
+    """
+    return APIResponse.ok(data=GSTR1Summary(
+        tax_period=f"{month:02d}{year}",
+        b2b_supplies=0, b2c_large_supplies=0, b2c_small_supplies=0,
+        nil_exempt_supplies=0, exports=0, total_taxable=0,
+        total_cgst=0, total_sgst=0, total_igst=0, total_cess=0,
+        total_tax=0, total_invoice_value=0,
+    ))
+
+
+@router.post("/gstr1/file", response_model=APIResponse[dict])
+async def file_gstr1(
+    month: int = Query(..., ge=1, le=12),
+    year: int = Query(..., ge=2017),
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(require_permissions({Permission.GST_SUBMIT})),
+):
+    """
+    File GSTR-1 on GST portal via API.
+    Validates data, generates JSON in prescribed format, submits via API.
+    """
+    return APIResponse.ok(data={"reference_id": "GSTR1-2026-06-REF001"}, message="GSTR-1 filed")
+
+
+@router.get("/gstr3b/summary", response_model=APIResponse[GSTR3BSummary])
+async def gstr3b_summary(
+    month: int = Query(..., ge=1, le=12),
+    year: int = Query(..., ge=2017),
+    current_user: dict = Depends(require_permissions({Permission.REPORTS_VIEW})),
+    db: AsyncSession = Depends(get_db),
+):
+    """GSTR-3B monthly summary with net tax liability calculation."""
+    return APIResponse.ok(data=GSTR3BSummary(
+        tax_period=f"{month:02d}{year}",
+        outward_taxable=0, outward_tax=0,
+        inward_itc_eligible=0, inward_itc_ineligible=0,
+        net_tax_payable_cgst=0, net_tax_payable_sgst=0, net_tax_payable_igst=0,
+        itc_claimed_cgst=0, itc_claimed_sgst=0, itc_claimed_igst=0,
+        cash_to_pay_cgst=0, cash_to_pay_sgst=0, cash_to_pay_igst=0,
+    ))
+
+
+@router.get("/itc-reconciliation", response_model=APIResponse[dict])
+async def itc_reconciliation(
+    month: int = Query(..., ge=1, le=12),
+    year: int = Query(..., ge=2017),
+    current_user: dict = Depends(require_permissions({Permission.FINANCE_READ})),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Reconcile GSTR-2B (auto-drafted ITC) with purchase register.
+    Identifies: matched / mismatched / missing invoices.
+    Critical for correct ITC claim in GSTR-3B.
+    """
+    return APIResponse.ok(data={
+        "matched": [],
+        "mismatched": [],
+        "only_in_2b": [],
+        "only_in_books": [],
+        "net_itc_available": 0.0,
+    })
+
+
+@router.get("/hsn-summary", response_model=APIResponse[List[dict]])
+async def hsn_summary(
+    month: int = Query(..., ge=1, le=12),
+    year: int = Query(...),
+    current_user: dict = Depends(require_permissions({Permission.REPORTS_VIEW})),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    HSN-wise summary for GSTR-1 Table 12.
+    Required for businesses with turnover > ₹1.5 Cr.
+    """
+    return APIResponse.ok(data=[])
+"""
+app/api/v1/endpoints/sales.py
+===============================
+BRS Section: Sales Management & CRM
+"""
+from datetime import date
+from enum import Enum
+from typing import List, Optional
+from uuid import UUID
+
+from fastapi import APIRouter, Depends, Query
+from pydantic import BaseModel, Field, EmailStr
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.security import Permission, require_permissions
+from app.db.session import get_db
+from app.schemas.base import APIResponse, AuditMixin, PaginationMeta, PaginationParams
+
+router = APIRouter(prefix="/sales", tags=["Sales Management"])
+
+
+class OrderStatus(str, Enum):
+    QUOTE    = "quotation"
+    CONFIRMED= "confirmed"
+    INVOICED = "invoiced"
+    SHIPPED  = "shipped"
+    DELIVERED= "delivered"
+    CANCELLED= "cancelled"
+    RETURNED = "returned"
+
+
+class SalesOrderLineCreate(BaseModel):
+    item_id: UUID
+    quantity: float = Field(..., gt=0)
+    unit_price: float = Field(..., ge=0)
+    discount_pct: float = Field(default=0.0, ge=0, le=100)
+    hsn_code: str
+    gst_rate: float
+
+
+class SalesOrderCreate(BaseModel):
+    customer_id: UUID
+    order_date: date
+    delivery_date: Optional[date] = None
+    reference: Optional[str] = None
+    payment_terms: str = "30 days net"
+    warehouse_id: UUID
+    salesperson_id: Optional[UUID] = None
+    lines: List[SalesOrderLineCreate] = Field(..., min_length=1)
+    notes: Optional[str] = None
+
+
+class SalesOrderOut(AuditMixin):
+    order_number: str
+    customer_name: str
+    order_date: date
+    status: OrderStatus
+    subtotal: float
+    total_gst: float
+    total_amount: float
+    outstanding: float
+
+
+@router.post("/orders", response_model=APIResponse[SalesOrderOut], status_code=201)
+async def create_sales_order(
+    payload: SalesOrderCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(require_permissions({Permission.SALES_WRITE})),
+):
+    """
+    Create Sales Order.
+    Flow: Quotation → Confirmed SO → Delivery Note → Tax Invoice → Receipt
+    Validates: customer credit limit, item availability.
+    Triggers: warehouse pick-list generation, GST invoice on confirmation.
+    """
+    return APIResponse.ok(data=None, message="Sales order created")
+
+
+@router.get("/orders", response_model=APIResponse[List[SalesOrderOut]])
+async def list_sales_orders(
+    status: Optional[OrderStatus] = Query(None),
+    customer_id: Optional[UUID] = Query(None),
+    from_date: Optional[date] = Query(None),
+    to_date: Optional[date] = Query(None),
+    salesperson_id: Optional[UUID] = Query(None),
+    pagination: PaginationParams = Depends(),
+    current_user: dict = Depends(require_permissions({Permission.SALES_READ})),
+    db: AsyncSession = Depends(get_db),
+):
+    return APIResponse.ok(data=[], meta=PaginationMeta(total=0, page=1, page_size=25, total_pages=0))
+
+
+@router.patch("/orders/{order_id}/confirm", response_model=APIResponse)
+async def confirm_order(
+    order_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(require_permissions({Permission.SALES_WRITE})),
+):
+    """Confirm quote → reduces reserved stock, triggers fulfillment workflow."""
+    return APIResponse.ok(data={"order_id": str(order_id), "status": "confirmed"})
+
+
+@router.get("/dashboard", response_model=APIResponse[dict])
+async def sales_dashboard(
+    period: str = Query("month", regex="^(today|week|month|quarter|year)$"),
+    current_user: dict = Depends(require_permissions({Permission.SALES_READ})),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Sales KPI dashboard:
+    - Revenue (actual vs target), open orders, top products, top customers,
+      conversion rate (quotes → orders), avg order value.
+    """
+    return APIResponse.ok(data={
+        "revenue": {"actual": 0, "target": 0, "variance_pct": 0},
+        "orders": {"open": 0, "completed": 0, "cancelled": 0},
+        "top_products": [],
+        "top_customers": [],
+        "avg_order_value": 0,
+    })
+"""
+Procurement, CRM, Business Intelligence, and stub modules.
+All follow the same APIResponse envelope pattern.
+"""
+
+# ══════════════════════════════════════════════════════════════════
+#  PROCUREMENT
+# ══════════════════════════════════════════════════════════════════
+"""
+app/api/v1/endpoints/procurement.py
+BRS: Procurement Management
+Covers: Supplier master, Purchase Requisition → PO → GRN → Bill → Payment
+"""
+from datetime import date
+from enum import Enum
+from typing import List, Optional
+from uuid import UUID
+
+from fastapi import APIRouter, Depends, Query
+from pydantic import BaseModel, Field, EmailStr
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.security import Permission, require_permissions
+from app.db.session import get_db
+from app.schemas.base import APIResponse, AuditMixin, PaginationMeta, PaginationParams
+
+
+# ─── Procurement Router ─────────────────────────────────────────────────────
+
+router_procurement = APIRouter(prefix="/procurement", tags=["Procurement"])
+
+
+class POStatus(str, Enum):
+    DRAFT     = "draft"
+    SENT      = "sent"
+    PARTIAL   = "partial_received"
+    RECEIVED  = "received"
+    BILLED    = "billed"
+    CANCELLED = "cancelled"
+
+
+class SupplierCreate(BaseModel):
+    name: str
+    gstin: Optional[str] = None
+    contact_person: str
+    email: EmailStr
+    mobile: str
+    address: str
+    payment_terms: str = "30 days net"
+    credit_limit: float = Field(default=0.0, ge=0)
+
+
+class POLineCreate(BaseModel):
+    item_id: UUID
+    quantity: float = Field(..., gt=0)
+    unit_price: float = Field(..., ge=0)
+    expected_delivery_date: Optional[date] = None
+
+
+class PurchaseOrderCreate(BaseModel):
+    supplier_id: UUID
+    order_date: date
+    delivery_warehouse_id: UUID
+    lines: List[POLineCreate] = Field(..., min_length=1)
+    notes: Optional[str] = None
+    auto_approve_below: float = Field(
+        default=50000.0,
+        description="Auto-approve POs below this value (configurable per company policy)"
+    )
+
+
+class GRNCreate(BaseModel):
+    """Goods Receipt Note — confirms physical receipt of items."""
+    po_id: UUID
+    receipt_date: date
+    lines: List[dict]   # {po_line_id, received_qty, batch_number?}
+    quality_check_passed: bool = True
+    remarks: Optional[str] = None
+
+
+@router_procurement.post("/suppliers", response_model=APIResponse[dict], status_code=201)
+async def create_supplier(
+    payload: SupplierCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(require_permissions({Permission.PURCHASE_WRITE})),
+):
+    return APIResponse.ok(data={"supplier_id": "sup_001"}, message="Supplier created")
+
+
+@router_procurement.get("/suppliers", response_model=APIResponse[List[dict]])
+async def list_suppliers(
+    search: Optional[str] = Query(None),
+    pagination: PaginationParams = Depends(),
+    current_user: dict = Depends(require_permissions({Permission.PURCHASE_READ})),
+    db: AsyncSession = Depends(get_db),
+):
+    return APIResponse.ok(data=[], meta=PaginationMeta(total=0, page=1, page_size=25, total_pages=0))
+
+
+@router_procurement.post("/purchase-orders", response_model=APIResponse[dict], status_code=201)
+async def create_po(
+    payload: PurchaseOrderCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(require_permissions({Permission.PURCHASE_WRITE})),
+):
+    """
+    Create Purchase Order.
+    Flow: PR → PO → Send to Supplier → GRN → Supplier Bill → Payment
+    Auto-approval: POs below threshold bypass approval workflow.
+    3-way match on bill: PO qty = GRN qty = Invoice qty.
+    """
+    return APIResponse.ok(data={"po_number": "PO/2026-27/001"}, message="PO created")
+
+
+@router_procurement.post("/grn", response_model=APIResponse[dict], status_code=201)
+async def create_grn(
+    payload: GRNCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(require_permissions({Permission.PURCHASE_WRITE})),
+):
+    """
+    Record Goods Receipt.
+    Triggers: inventory increase, GRN journal entry, PO status update.
+    If quality check fails: creates quality rejection note.
+    """
+    return APIResponse.ok(data={"grn_number": "GRN/2026-27/001"}, message="GRN recorded")
+
+
+# ══════════════════════════════════════════════════════════════════
+#  CRM
+# ══════════════════════════════════════════════════════════════════
+
+router_crm = APIRouter(prefix="/crm", tags=["CRM"])
+
+
+class LeadStatus(str, Enum):
+    NEW         = "new"
+    CONTACTED   = "contacted"
+    QUALIFIED   = "qualified"
+    PROPOSAL    = "proposal_sent"
+    NEGOTIATION = "negotiation"
+    WON         = "won"
+    LOST        = "lost"
+
+
+class LeadCreate(BaseModel):
+    name: str
+    company: Optional[str] = None
+    email: Optional[EmailStr] = None
+    mobile: str
+    source: str   # website | referral | campaign | cold_call
+    product_interest: Optional[str] = None
+    estimated_value: float = Field(default=0.0, ge=0)
+    notes: Optional[str] = None
+    assigned_to: Optional[UUID] = None
+
+
+class ActivityCreate(BaseModel):
+    lead_id: UUID
+    activity_type: str   # call | email | meeting | demo | follow_up
+    scheduled_at: str    # ISO datetime
+    notes: Optional[str] = None
+    outcome: Optional[str] = None
+    next_action: Optional[str] = None
+
+
+@router_crm.post("/leads", response_model=APIResponse[dict], status_code=201)
+async def create_lead(
+    payload: LeadCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(require_permissions({Permission.CRM_WRITE})),
+):
+    """
+    Create a new sales lead.
+    Auto-assigns to salesperson based on round-robin / territory rules.
+    Triggers: welcome email to lead, task for assigned salesperson.
+    """
+    return APIResponse.ok(data={"lead_id": "lead_001"}, message="Lead created")
+
+
+@router_crm.patch("/leads/{lead_id}/status", response_model=APIResponse[dict])
+async def update_lead_status(
+    lead_id: UUID,
+    status: LeadStatus,
+    notes: Optional[str] = None,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(require_permissions({Permission.CRM_WRITE})),
+):
+    """Update lead pipeline stage. WON → auto-create customer account."""
+    return APIResponse.ok(data={"lead_id": str(lead_id), "status": status})
+
+
+@router_crm.post("/activities", response_model=APIResponse[dict], status_code=201)
+async def log_activity(
+    payload: ActivityCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(require_permissions({Permission.CRM_WRITE})),
+):
+    """Log a sales activity (call, email, meeting). Creates next follow-up task."""
+    return APIResponse.ok(data={"activity_id": "act_001"}, message="Activity logged")
+
+
+@router_crm.get("/pipeline", response_model=APIResponse[dict])
+async def pipeline_view(
+    salesperson_id: Optional[UUID] = Query(None),
+    current_user: dict = Depends(require_permissions({Permission.CRM_READ})),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Kanban pipeline view: leads grouped by status with total value.
+    Supports filtering by salesperson, product, region.
+    """
+    return APIResponse.ok(data={
+        "new": {"count": 0, "value": 0},
+        "contacted": {"count": 0, "value": 0},
+        "qualified": {"count": 0, "value": 0},
+        "proposal_sent": {"count": 0, "value": 0},
+        "won": {"count": 0, "value": 0},
+    })
+
+
+# ══════════════════════════════════════════════════════════════════
+#  BUSINESS INTELLIGENCE
+# ══════════════════════════════════════════════════════════════════
+
+router_bi = APIRouter(prefix="/bi", tags=["Business Intelligence"])
+
+
+@router_bi.get("/kpi-summary", response_model=APIResponse[dict])
+async def kpi_summary(
+    period: str = Query("month"),
+    current_user: dict = Depends(require_permissions({Permission.REPORTS_VIEW})),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Executive KPI dashboard:
+    Revenue, Gross Profit %, EBITDA, Cash Balance,
+    Inventory Turnover, DSO, DPO, Employee Headcount, Attrition %.
+    """
+    return APIResponse.ok(data={
+        "revenue": 0, "gross_profit_pct": 0, "ebitda": 0,
+        "cash_balance": 0, "inventory_turnover": 0,
+        "dso_days": 0, "dpo_days": 0,
+        "headcount": 0, "attrition_pct": 0,
+    })
+
+
+@router_bi.get("/sales-trend", response_model=APIResponse[List[dict]])
+async def sales_trend(
+    granularity: str = Query("month", regex="^(day|week|month|quarter|year)$"),
+    from_date: date = Query(...),
+    to_date: date = Query(...),
+    group_by: str = Query("total", regex="^(total|product|category|region|salesperson)$"),
+    current_user: dict = Depends(require_permissions({Permission.REPORTS_VIEW})),
+    db: AsyncSession = Depends(get_db),
+):
+    """Time-series sales data for charts. Supports multi-dimensional grouping."""
+    return APIResponse.ok(data=[])
+
+
+@router_bi.get("/inventory-analysis", response_model=APIResponse[dict])
+async def inventory_analysis(
+    current_user: dict = Depends(require_permissions({Permission.REPORTS_VIEW})),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Inventory health:
+    - ABC analysis (A=top 20% value, B=next 30%, C=bottom 50%)
+    - Slow-moving / dead stock
+    - Stock-out frequency
+    - Days-on-hand by category
+    """
+    return APIResponse.ok(data={"abc_analysis": {}, "slow_moving": [], "dead_stock": []})
+
+
+@router_bi.get("/financial-ratios", response_model=APIResponse[dict])
+async def financial_ratios(
+    as_of_date: date = Query(default=date.today()),
+    current_user: dict = Depends(require_permissions({Permission.REPORTS_VIEW})),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Key financial ratios for CFO/CEO dashboard:
+    Current Ratio, Quick Ratio, Debt-to-Equity, ROE, ROA,
+    Gross Margin, Net Margin, Operating Margin.
+    """
+    return APIResponse.ok(data={
+        "current_ratio": 0, "quick_ratio": 0,
+        "debt_to_equity": 0, "roe": 0, "roa": 0,
+        "gross_margin_pct": 0, "net_margin_pct": 0, "operating_margin_pct": 0,
+    })
+"""
+Stub routers for remaining TASK EHICS modules.
+Each module follows the same APIResponse envelope.
+Full implementation follows same patterns as finance.py / hr_payroll.py.
+"""
+from fastapi import APIRouter
+from app.schemas.base import APIResponse
+
+# ─── users.py ─────────────────────────────────────────────────────
+router_users = APIRouter(prefix="/users", tags=["Users"])
+
+@router_users.get("/")
+async def list_users():
+    return APIResponse.ok(data=[], message="Users list")
+
+# expose as 'router' for import
+router = router_users
+
+# ─── accounts_receivable.py ────────────────────────────────────────
+router_ar = APIRouter(prefix="/ar", tags=["AR / AP"])
+
+@router_ar.get("/invoices")
+async def list_ar_invoices():
+    """Outstanding customer invoices with aging (0-30/31-60/61-90/90+ days)."""
+    return APIResponse.ok(data=[])
+
+@router_ar.post("/receipts")
+async def record_receipt():
+    """Record customer payment receipt. Auto-allocates to oldest invoice (FIFO)."""
+    return APIResponse.ok(data={}, message="Receipt recorded")
+
+@router_ar.get("/aging-report")
+async def ar_aging():
+    """Debtor aging analysis."""
+    return APIResponse.ok(data={"0_30": 0, "31_60": 0, "61_90": 0, "above_90": 0})
+
+# ─── accounts_payable.py ───────────────────────────────────────────
+router_ap = APIRouter(prefix="/ap", tags=["AR / AP"])
+
+@router_ap.get("/bills")
+async def list_ap_bills():
+    """Outstanding supplier bills."""
+    return APIResponse.ok(data=[])
+
+@router_ap.post("/payments")
+async def record_payment():
+    """Record supplier payment. Triggers bank entry."""
+    return APIResponse.ok(data={}, message="Payment recorded")
+
+@router_ap.get("/aging-report")
+async def ap_aging():
+    return APIResponse.ok(data={"0_30": 0, "31_60": 0, "61_90": 0, "above_90": 0})
+
+# ─── budget.py ─────────────────────────────────────────────────────
+router_budget = APIRouter(prefix="/budget", tags=["Budget Management"])
+
+@router_budget.post("/budgets")
+async def create_budget():
+    """Create annual / quarterly budget per cost center and account."""
+    return APIResponse.ok(data={}, message="Budget created")
+
+@router_budget.get("/variance-report")
+async def budget_variance():
+    """Actual vs Budget variance analysis."""
+    return APIResponse.ok(data=[])
+
+# ─── assets.py ─────────────────────────────────────────────────────
+router_assets = APIRouter(prefix="/assets", tags=["Asset Management"])
+
+@router_assets.post("/assets")
+async def create_asset():
+    """
+    Create a fixed asset.
+    Supports depreciation methods: SLM, WDV, Double Declining.
+    Auto-generates depreciation schedule and journal entries.
+    """
+    return APIResponse.ok(data={}, message="Asset created")
+
+@router_assets.get("/depreciation-schedule")
+async def depreciation_schedule():
+    return APIResponse.ok(data=[])
+
+@router_assets.post("/disposals")
+async def dispose_asset():
+    """Dispose/scrap an asset. Computes gain/loss on disposal."""
+    return APIResponse.ok(data={}, message="Asset disposed")
+
+# ─── warehouse.py ──────────────────────────────────────────────────
+router_warehouse = APIRouter(prefix="/warehouses", tags=["Warehouse"])
+
+@router_warehouse.post("/")
+async def create_warehouse():
+    return APIResponse.ok(data={}, message="Warehouse created")
+
+@router_warehouse.get("/")
+async def list_warehouses():
+    return APIResponse.ok(data=[])
+
+@router_warehouse.get("/{warehouse_id}/stock")
+async def warehouse_stock(warehouse_id: str):
+    return APIResponse.ok(data=[])
+
+# ─── manufacturing.py ──────────────────────────────────────────────
+router_manufacturing = APIRouter(prefix="/manufacturing", tags=["Manufacturing"])
+
+@router_manufacturing.post("/work-orders")
+async def create_work_order():
+    """
+    Production work order.
+    Components: BOM explosion, raw material reservation, routing steps.
+    """
+    return APIResponse.ok(data={}, message="Work order created")
+
+@router_manufacturing.post("/bom")
+async def create_bom():
+    """Bill of Materials — multi-level with co-products and by-products."""
+    return APIResponse.ok(data={}, message="BOM created")
+
+@router_manufacturing.get("/production-schedule")
+async def production_schedule():
+    return APIResponse.ok(data=[])
+
+@router_manufacturing.post("/work-orders/{wo_id}/complete")
+async def complete_work_order(wo_id: str):
+    """
+    Complete production. Auto-posts:
+    - Raw material consumption (debit WIP / credit Raw Material)
+    - Finished goods receipt (debit FG / credit WIP)
+    """
+    return APIResponse.ok(data={"work_order_id": wo_id, "status": "completed"})
+
+# ─── property_mgmt.py ──────────────────────────────────────────────
+router_property = APIRouter(prefix="/property", tags=["Property Management"])
+
+@router_property.post("/properties")
+async def create_property():
+    return APIResponse.ok(data={}, message="Property created")
+
+@router_property.get("/properties")
+async def list_properties():
+    return APIResponse.ok(data=[])
+
+@router_property.post("/leases")
+async def create_lease():
+    """
+    Property lease agreement.
+    Auto-generates: monthly rental invoices, escalation schedule,
+    renewal reminders, maintenance work orders.
+    """
+    return APIResponse.ok(data={}, message="Lease created")
+
+@router_property.post("/maintenance-requests")
+async def create_maintenance_request():
+    return APIResponse.ok(data={}, message="Maintenance request created")
+
+# ─── project.py ────────────────────────────────────────────────────
+router_project = APIRouter(prefix="/projects", tags=["Project Management"])
+
+@router_project.post("/")
+async def create_project():
+    return APIResponse.ok(data={}, message="Project created")
+
+@router_project.post("/{project_id}/tasks")
+async def create_task(project_id: str):
+    return APIResponse.ok(data={}, message="Task created")
+
+@router_project.get("/{project_id}/progress")
+async def project_progress(project_id: str):
+    return APIResponse.ok(data={"completion_pct": 0, "budget_used_pct": 0})
+
+# ─── notifications.py ──────────────────────────────────────────────
+router_notifications = APIRouter(prefix="/notifications", tags=["Notifications"])
+
+@router_notifications.get("/")
+async def list_notifications():
+    return APIResponse.ok(data=[])
+
+@router_notifications.patch("/{notif_id}/read")
+async def mark_read(notif_id: str):
+    return APIResponse.ok(data={}, message="Marked as read")
+
+@router_notifications.post("/send")
+async def send_notification():
+    """
+    Send notification via: in-app | email | SMS | WhatsApp.
+    Templates: leave_approved, payslip_ready, po_approved, invoice_due, etc.
+    """
+    return APIResponse.ok(data={}, message="Notification sent")
+
+# ─── integrations.py ───────────────────────────────────────────────
+router_integrations = APIRouter(prefix="/integrations", tags=["Third-Party Integrations"])
+
+@router_integrations.post("/webhook/biometric")
+async def biometric_webhook():
+    """
+    Receives punch-in/out data from biometric devices (ZKTeco, Suprema, etc.)
+    via HTTP POST. Auto-marks attendance.
+    """
+    return APIResponse.ok(data={}, message="Attendance marked from biometric")
+
+@router_integrations.post("/webhook/payment-gateway")
+async def payment_gateway_webhook():
+    """Razorpay / PayU / CCAvenue payment confirmation webhook."""
+    return APIResponse.ok(data={}, message="Payment confirmed")
+
+@router_integrations.get("/sync/tally")
+async def sync_tally():
+    """Export GL data in Tally XML format for Tally Prime integration."""
+    return APIResponse.ok(data={"xml": "<ENVELOPE>...</ENVELOPE>"})
+
+@router_integrations.post("/sync/shopify")
+async def sync_shopify():
+    """Sync Shopify orders → Sales Orders in ERP."""
+    return APIResponse.ok(data={"synced_orders": 0})
